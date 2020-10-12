@@ -24,9 +24,9 @@ else if (conf.storage === 'sqlite'){
 
 function executeInTransaction(doWork, onDone){
 	module.exports.takeConnectionFromPool(function(conn){
-		conn.query("BEGIN", function(){
+		conn.query("SAVEPOINT executeInTransaction", function(){
 			doWork(conn, function(err){
-				conn.query(err ? "ROLLBACK" : "COMMIT", function(){
+				conn.query(err ? "ROLLBACK TO executeInTransaction" : "RELEASE executeInTransaction", function(){
 					conn.release();
 					if (onDone)
 						onDone(err);

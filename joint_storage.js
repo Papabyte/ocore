@@ -54,10 +54,10 @@ function checkIfNewJoint(objJoint, callbacks) {
 function removeUnhandledJointAndDependencies(unit, onDone){
 	db.takeConnectionFromPool(function(conn){
 		var arrQueries = [];
-		conn.addQuery(arrQueries, "BEGIN");
+	//	conn.addQuery(arrQueries, "BEGIN");
 		conn.addQuery(arrQueries, "DELETE FROM unhandled_joints WHERE unit=?", [unit]);
 		conn.addQuery(arrQueries, "DELETE FROM dependencies WHERE unit=?", [unit]);
-		conn.addQuery(arrQueries, "COMMIT");
+	//	conn.addQuery(arrQueries, "COMMIT");
 		async.series(arrQueries, function(){
 			delete assocUnhandledUnits[unit];
 			conn.release();
@@ -75,10 +75,10 @@ function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer
 			return "("+conn.escape(unit)+", "+conn.escape(missing_unit)+")";
 		}).join(", ");
 		var arrQueries = [];
-		conn.addQuery(arrQueries, "BEGIN");
+	//	conn.addQuery(arrQueries, "BEGIN");
 		conn.addQuery(arrQueries, "INSERT "+conn.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
 		conn.addQuery(arrQueries, sql);
-		conn.addQuery(arrQueries, "COMMIT");
+	//	conn.addQuery(arrQueries, "COMMIT");
 		async.series(arrQueries, function(){
 			conn.release();
 			if (onDone)
@@ -148,12 +148,12 @@ function purgeJointAndDependencies(objJoint, error, onPurgedDependentJoint, onDo
 	assocKnownBadUnits[unit] = error;
 	db.takeConnectionFromPool(function(conn){
 		var arrQueries = [];
-		conn.addQuery(arrQueries, "BEGIN");
+	//	conn.addQuery(arrQueries, "BEGIN");
 		conn.addQuery(arrQueries, "INSERT "+conn.getIgnore()+" INTO known_bad_joints (unit, json, error) VALUES (?,?,?)", [unit, JSON.stringify(objJoint), error]);
 		conn.addQuery(arrQueries, "DELETE FROM unhandled_joints WHERE unit=?", [unit]); // if any
 		conn.addQuery(arrQueries, "DELETE FROM dependencies WHERE unit=?", [unit]);
 		collectQueriesToPurgeDependentJoints(conn, arrQueries, unit, error, onPurgedDependentJoint, function(){
-			conn.addQuery(arrQueries, "COMMIT");
+	//		conn.addQuery(arrQueries, "COMMIT");
 			async.series(arrQueries, function(){
 				delete assocUnhandledUnits[unit];
 				conn.release();
@@ -168,9 +168,9 @@ function purgeJointAndDependencies(objJoint, error, onPurgedDependentJoint, onDo
 function purgeDependencies(unit, error, onPurgedDependentJoint, onDone){
 	db.takeConnectionFromPool(function(conn){
 		var arrQueries = [];
-		conn.addQuery(arrQueries, "BEGIN");
+	//	conn.addQuery(arrQueries, "BEGIN");
 		collectQueriesToPurgeDependentJoints(conn, arrQueries, unit, error, onPurgedDependentJoint, function(){
-			conn.addQuery(arrQueries, "COMMIT");
+	//		conn.addQuery(arrQueries, "COMMIT");
 			async.series(arrQueries, function(){
 				conn.release();
 				if (onDone)
@@ -252,9 +252,9 @@ function purgeUncoveredNonserialJoints(bByExistenceOfChildren, onDone){
 							ifFound: function (objJoint) {
 								mutex.lock(["write"], function(unlock){
 									var arrQueries = [];
-									conn.addQuery(arrQueries, "BEGIN");
+								//	conn.addQuery(arrQueries, "BEGIN");
 									archiving.generateQueriesToArchiveJoint(conn, objJoint, 'uncovered', arrQueries, function(){
-										conn.addQuery(arrQueries, "COMMIT");
+								//		conn.addQuery(arrQueries, "COMMIT");
 										kvstore.del('j\n'+row.unit, function(){
 											async.series(arrQueries, function(){
 												breadcrumbs.add("------- done archiving "+row.unit);

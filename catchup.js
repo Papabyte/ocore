@@ -343,7 +343,7 @@ function processHashTree(arrBalls, callbacks){
 			
 			db.takeConnectionFromPool(function(conn){
 				
-				conn.query("BEGIN", function(){
+				conn.query("SAVEPOINT processHashTree", function(){
 					
 					var max_mci = null;
 					async.eachSeries(
@@ -412,7 +412,7 @@ function processHashTree(arrBalls, callbacks){
 						function(error){
 							
 							function finish(err){
-								conn.query(err ? "ROLLBACK" : "COMMIT", function(){
+								conn.query(err ? "ROLLBACK TO processHashTree" : "RELEASE processHashTree", function(){
 									conn.release();
 									unlock();
 									err ? callbacks.ifError(err) : callbacks.ifOk();

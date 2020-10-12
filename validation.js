@@ -34,6 +34,7 @@ var isValidAddress = ValidationUtils.isValidAddress;
 var isValidBase64 = ValidationUtils.isValidBase64;
 
 var assocWitnessListMci = {};
+var count_units = 0;
 
 function hasValidHashes(objJoint){
 	var objUnit = objJoint.unit;
@@ -208,9 +209,24 @@ function validate(objJoint, callbacks, external_conn) {
 						conn = new_conn;
 						start_time = Date.now();
 						commit_fn = function (cb2) {
-							conn.query(objValidationState.bAdvancedLastStableMci ? "COMMIT" : "ROLLBACK", function () { cb2(); });
+				
+							conn.query(objValidationState.bAdvancedLastStableMci ? "RELEASE validation" : "ROLLBACK TO validation", function () { 
+								count_units++;
+								if (count_units % 20 == 0)
+									conn.query("COMMIT", function(){cb2();});
+								else
+									cb2(); 
+							});
+	
 						};
-						conn.query("BEGIN", function(){cb();});
+						if (count_units % 20 == 0)
+							conn.query("BEGIN",function(){
+								conn.query("SAVEPOINT validation", function(){cb();});
+							});
+						else
+							conn.query("SAVEPOINT validation", function(){cb();});
+
+
 					});
 				},
 				function(cb){

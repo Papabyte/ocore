@@ -20,6 +20,7 @@ var bCordova = (typeof window === 'object' && window.cordova);
 var count_writes = 0;
 var count_units_in_prev_analyze = 0;
 
+
 function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 	var objUnit = objJoint.unit;
 	console.log("\nsaving unit "+objUnit.unit);
@@ -37,7 +38,7 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 		}
 		db.takeConnectionFromPool(function (conn) {
 			profiler.start();
-			conn.addQuery(arrQueries, "BEGIN");
+			conn.addQuery(arrQueries, "SAVEPOINT writer");
 			commit_fn = function (sql, cb) {
 				conn.query(sql, function () {
 					cb();
@@ -637,7 +638,7 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 						}
 						
 						saveToKvStore(function(){
-							commit_fn(err ? "ROLLBACK" : "COMMIT", function(){
+							commit_fn(err ? "ROLLBACK TO writer" : "RELEASE writer", function(){
 								var consumed_time = Date.now()-start_time;
 								profiler.add_result('write', consumed_time);
 								console.log((err ? (err+", therefore rolled back unit ") : "committed unit ")+objUnit.unit+", write took "+consumed_time+"ms");
