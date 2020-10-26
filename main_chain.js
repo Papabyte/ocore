@@ -1129,8 +1129,8 @@ function determineIfStableInLaterUnits(conn, earlier_unit, arrLaterUnits, handle
 
 // It is assumed earlier_unit is not marked as stable yet
 // If it appears to be stable, its MC index will be marked as stable, as well as all preceeding MC indexes
-function determineIfStableInLaterUnitsAndUpdateStableMcFlag(conn, earlier_unit, arrLaterUnits, bStableInDb, handleResult){
-	determineIfStableInLaterUnits(conn, earlier_unit, arrLaterUnits, function(bStable){
+function determineIfStableInLaterUnitsAndUpdateStableMcFlag(subBatch, earlier_unit, arrLaterUnits, bStableInDb, handleResult){
+	determineIfStableInLaterUnits(subBatch.sql, earlier_unit, arrLaterUnits, function(bStable){
 		console.log("determineIfStableInLaterUnits", earlier_unit, arrLaterUnits, bStable);
 		if (!bStable)
 			return handleResult(bStable);
@@ -1139,7 +1139,7 @@ function determineIfStableInLaterUnitsAndUpdateStableMcFlag(conn, earlier_unit, 
 		breadcrumbs.add('stable in parents, will wait for write lock');
 		mutex.lock(["write"], function(unlock){
 			breadcrumbs.add('stable in parents, got write lock');
-			storage.readLastStableMcIndex(conn, function(last_stable_mci){
+			storage.readLastStableMcIndex(subBatch.sql, function(last_stable_mci){
 				storage.readUnitProps(conn, earlier_unit, function(objEarlierUnitProps){
 					var new_last_stable_mci = objEarlierUnitProps.main_chain_index;
 					if (new_last_stable_mci <= last_stable_mci) // fix: it could've been changed by parallel tasks - No, our SQL transaction doesn't see the changes
@@ -1151,7 +1151,7 @@ function determineIfStableInLaterUnitsAndUpdateStableMcFlag(conn, earlier_unit, 
 					function advanceLastStableMcUnitAndStepForward(){
 						mci++;
 						if (mci <= new_last_stable_mci)
-							markMcIndexStable(conn, batch, mci, advanceLastStableMcUnitAndStepForward);
+							markMcIndexStable(subBatch.sql, subBatch.kv, mci, advanceLastStableMcUnitAndStepForward);
 						else{
 							batch.write(function(err){
 								if (err)
@@ -1386,7 +1386,7 @@ function markMcIndexStable(conn, batch, mci, onDone){
 										conn.query("DELETE FROM hash_tree_balls WHERE ball=?", [ball], function(){
 											delete storage.assocHashTreeUnitsByBall[ball];
 											var key = 'j\n'+unit;
-											kvstore.get(key, function(old_joint){
+											batch.get(key, function(old_joint){
 												if (!old_joint)
 													throw Error("unit not found in kv store: "+unit);
 												var objJoint = JSON.parse(old_joint);

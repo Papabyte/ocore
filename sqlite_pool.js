@@ -10,6 +10,17 @@ var sqlite3;
 var path;
 var cordovaSqlite;
 
+var bOngoingBatch = false;
+
+
+function flagOnGoingBatch(){
+	bOngoingBatch = true;
+}
+function unflagOnGoingBatch(){
+	bOngoingBatch = false;
+}
+
+
 if (bCordova){
 	// will error before deviceready
 	//cordovaSqlite = window.cordova.require('cordova-sqlite-plugin.SQLite');
@@ -37,7 +48,7 @@ module.exports = function(db_name, MAX_CONNECTIONS, bReadOnly){
 	var eventEmitter = new EventEmitter();
 	var bReady = false;
 	var arrConnections = [];
-	var arrQueue = [];
+	var arrConnectionsQueue = [];
 
 	function connect(handleConnection){
 		console.log("opening new db connection");
@@ -71,12 +82,13 @@ module.exports = function(db_name, MAX_CONNECTIONS, bReadOnly){
 			
 			release: function(){
 				//console.log("released connection");
-				this.bInUse = false;
-				if (arrQueue.length === 0)
-					return;
-				var connectionHandler = arrQueue.shift();
-				this.bInUse = true;
-				connectionHandler(this);
+				executeQueriesQueue(this, function(){
+					if (arrConnectionsQueue.length === 0)
+						return this.bInUse = false;
+					var connectionHandler = arrConnectionsQueue.shift();
+					this.bInUse = true;
+					connectionHandler(this);
+				})
 			},
 			
 			query: function(){
@@ -212,12 +224,12 @@ module.exports = function(db_name, MAX_CONNECTIONS, bReadOnly){
 			}
 
 		// second, try to open a new connection
-		if (arrConnections.length < MAX_CONNECTIONS)
+		if (arrConnections.length < MAX_CONNECTIONS && bOngoingBatch)
 			return connect(handleConnection);
 
 		// third, queue it
 		//console.log("queuing");
-		arrQueue.push(handleConnection);
+		arrConnectionsQueue.push(handleConnection);
 	}
 	
 	function onDbReady(){
@@ -255,6 +267,9 @@ module.exports = function(db_name, MAX_CONNECTIONS, bReadOnly){
 				new_args.push(resolve);
 				self.query.apply(self, new_args);
 			});
+
+		if (bOngoingBatch)
+			return arrQueriesQueue.push(new_args.push(last_arg))
 		takeConnectionFromPool(function(connection){
 			// add callback that releases the connection before calling the supplied callback
 			new_args.push(function(rows){
@@ -263,6 +278,23 @@ module.exports = function(db_name, MAX_CONNECTIONS, bReadOnly){
 			});
 			connection.query.apply(connection, new_args);
 		});
+	}
+
+	function executeQueriesQueue(connection, callback){
+		async.forEachOfSeries(
+			arrQueriesQueue,
+			function(args, i, cb){
+				args[args.length - 1] = function(){
+					cb();
+					args[args.length - 1]();
+				}
+				connection.query.apply(connection, args);
+			},function(){
+				arrQueriesQueue = [];
+				callback();
+			}
+			
+		);
 	}
 	
 	function close(cb){
@@ -470,3 +502,7 @@ function createDatabaseIfNecessary(db_name, onDbReady){
 		});
 	}
 }
+
+
+exports.flagOnGoingBatch = flagOnGoingBatch;
+exports.unflagOnGoingBatch = unflagOnGoingBatch;
