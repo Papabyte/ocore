@@ -3,12 +3,12 @@
 if (typeof window === 'object' && window.cordova)
 	return;
 var fs = require("fs");
-var eventBus = require("ocore/event_bus.js");
-var desktopApp = require('ocore/desktop_app.js');
+var eventBus = require("./event_bus.js");
+var desktopApp = require('./desktop_app.js');
 var appDataDir = desktopApp.getAppDataDir();
 
 var bPrintOnExit = false;
-var printOnScreenPeriodInSeconds = 0;
+var printOnScreenPeriodInSeconds = 20;
 var printOnFileMciPeriod = 0;
 var directoryName = "profiler";
 
@@ -241,6 +241,7 @@ if (bOn){
 	exports.start_sl1 = function(){};
 	exports.stop_sl1 = function(){};
 	exports.increment = function(){};
+	exports.isStarted = function(){};
 }
 
 exports.print = print_on_log;

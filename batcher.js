@@ -4,135 +4,224 @@ var db = require('./db.js');
 var kvstore = require('./kvstore.js');
 var EventEmitter = require('events').EventEmitter;
 var util = require('util');
+var async = require('async');
 
 
 var savepoint_index = 0;
 var conn;
 var batch;
+
 var bOngoingBatch = false;
+var bOngoingSubBatch = false;
+var waitingConnection = false;
 
 var bCommit = false;
 var timerId;
 
 var kvCachePut = {};
 var kvCacheDel = {};
+var kvSubCachePut = {};
+var kvSubCacheDel = {};
+
+
+var arrSingleQueries = [];
+var arrSubBatches = [];
+
+var rollbackeds = [];
 
 exports.query = function(sql, args, cb) {
-	if (bOngoingBatch)
-		conn.query(sql, args, cb);
-	else
-		db.query(sql, args, cb);
+	if (bOngoingBatch || waitingConnection){
+		if (waitingConnection)
+			return arrSingleQueries.push(executeQuery);
+		else
+			executeQuery();
+		function executeQuery(){
+		if (cb)
+			conn.query(sql, args, cb);
+		else
+			conn.query(sql, args)
+		}
+	}
+	else {
+		if (cb)
+			db.query(sql, args, cb);
+		else
+			db.query(sql, args);
+	}
 }
 
 exports.startSubBatch = function(callback){
-	var self = this;
-	if (!bOngoingBatch){
+	console.log('start new batch ' + bOngoingBatch + ' ' + bOngoingSubBatch + ' current index ' + savepoint_index)
+
+	if (!bOngoingBatch && !waitingConnection){
+		waitingConnection = true;
 		savepoint_index = 0;
 		bCommit = false;
-		db.flagOnGoingBatch();
-		self.kvCachePut = {};
-		self.kvCacheDel = {};
+	//	db.flagOnGoingBatch();
+	bOngoingSubBatch = true;
+
 
 		timerId = setTimeout(function(){
 			bCommit = true;
 		}, 1000);
 		batch = kvstore.batch();
 		db.takeConnectionFromPool(function (_conn) {
-			self.conn = _conn;
 			conn = _conn;
-			self.conn.query("BEGIN", function(){
-				self.savepoint_index = savepoint_index;
+			
+
+			conn.query("BEGIN", function(){
 				savepoint_index++;
-				self.conn.query("SAVEPOINT spt_" +  self.savepoint_index, function(){
-					callback(objSubBatchFunctions);
+				conn.query("SAVEPOINT spt_" +  savepoint_index, function(){
+					waitingConnection = false;
+					bOngoingBatch = true;
+					arrSingleQueries.forEach(function(exeQuery){
+						exeQuery();
+					});
+					arrSingleQueries = [];
+					console.log("createSubBatchfunctions " +  ' ' + bOngoingSubBatch)
+
+					callback(createSubBatchfunctions());
 				});
 			});
 		})
-	} else {
-		self.conn = conn;
-		self.savepoint_index = savepoint_index;
+	} else if (!bOngoingSubBatch && !waitingConnection) {
+		bOngoingSubBatch = true;
+
+		console.log('already in batch')
 		savepoint_index++;
-		self.conn.query("SAVEPOINT spt_" +  self.savepoint_index, function(){
-			callback(objSubBatchFunctions);
+		console.log("savepoint_index " + savepoint_index)
+		conn.query("SAVEPOINT spt_" +  savepoint_index, function(){
+			callback(createSubBatchfunctions());
 		});
+	} else {
+		console.log('subbatch ongoing, will queue');
+		arrSubBatches.push(callback);
+		//throw Error('on going sub batch');
 	}
 
-	var objSubBatchFunctions = {
-		release:function(cb){
-			self.conn.query("RELEASE spt_" + self.savepoint_index, function(){
-				commitIfNecessary(cb);
-			})
-		},
-		rollback:function(cb){
-			self.conn.query("ROLLBACK TO spt_" + self.savepoint_index, function(){
-				commitIfNecessary(cb);
-			})
-		},
+	function createSubBatchfunctions(){
 
-		sql: {
-			query: self.conn.query,
-			cquery: self.conn.cquery,
-			addQuery: self.conn.addQuery,
-			getFromUnixTime: self.conn.getFromUnixTime,
-			getIgnore: self.conn.getIgnore
-	
-		},
-		kv: {
-			get: function(key, cb){
-				if (self.kvCachePut[key])
-					return cb(null, self.kvCachePut[key]);
-				else if (self.kvCacheDel[key])
-					return cb({notFound: true, type: 'NotFoundError'});
-				else
-					return kvstore.get(key, cb);
-			},
-			put: function(key, value){
-				self.kvCachePut[key] = value;
-				delete self.kvCacheDel[key];
-			},
-			del: function(key){
-				self.kvCacheDel[key] = true;
-				delete self.kvCachePut[key];
-			},
-			createReadStream: function(options){
-				return new createReadStream(self, options)
-			},
-			write: function(cb){
-				for (var key in self.kvCacheDel){
-					batch.del(key);
-					kvCacheDel[key] = true;
-				}
-				for (var key in self.kvCachePut){
-					batch.put(key, self.kvCachePut[key]);
-					kvCachePut[key] = self.kvCachePut[key];
-				}
-				self.kvCachePut = {};
-				self.kvCacheDel = {};
+		const subSavePointIndex = savepoint_index;
 
-				cb();
+		var objSubBatchFunctions = {
+			release:function(cb){
+				console.log("RELEASE savepoint_index " + subSavePointIndex)
+				conn.query("RELEASE spt_" + subSavePointIndex, function(){
+					commitIfNecessary(cb);
+				})
+			},
+			rollback:function(cb){
+				console.log("ROLLBACK savepoint_index " + subSavePointIndex)
+				if (rollbackeds.indexOf(subSavePointIndex) > -1)
+					throw Error("already rollbacked")
+				rollbackeds.push(subSavePointIndex);
+
+				conn.query("ROLLBACK TO spt_" + subSavePointIndex, function(){
+					commitIfNecessary(cb);
+				})
+			},
+
+			sql: {
+				query: function(sql, args, cb){
+					if (cb)
+						conn.query(sql, args, cb)
+					else
+						conn.query(sql, args)
+
+					
+				},
+				cquery: conn.cquery,
+				addQuery: conn.addQuery,
+				getFromUnixTime: conn.getFromUnixTime,
+				getIgnore: conn.getIgnore,
+				escape: conn.escape
+		
+			},
+			kv: {
+				get: function(key, cb){
+					if (kvSubCachePut[key]){
+						console.log(key + " found in kvSubCachePut")
+						return cb(null, kvSubCachePut[key]);
+					}
+					else if (kvSubCacheDel[key]){
+						console.log(key + " deleted in kvSubCachePut")
+						return cb({notFound: true, type: 'NotFoundError'});
+					}
+					else {
+						console.log(key + " not found in kvSubCachePut")
+						return kvstore.get(key, cb);
+					}
+				},
+				put: function(key, value){
+					kvSubCachePut[key] = value;
+					delete kvSubCacheDel[key];
+				},
+				del: function(key){
+					kvSubCacheDel[key] = true;
+					delete kvSubCachePut[key];
+				},
+				createReadStream: function(options){
+					return new createReadStream(this, options)
+				},
+				write: function(cb){
+					console.log("write kv subbatch")
+					for (var key in kvSubCacheDel){
+						batch.del(key);
+						kvCacheDel[key] = true;
+					}
+					for (var key in kvSubCachePut){
+						batch.put(key, kvSubCachePut[key]);
+						kvCachePut[key] = kvSubCachePut[key];
+					}
+					cb();
+				}
+
+
 			}
-
-
 		}
-
+		return objSubBatchFunctions;
 	}
 	
 	function commitIfNecessary(cb){
+		console.log("commitIfNecessary")
 		if (bCommit){
+			console.log('will commit')
+
 			batch.write({sync: true}, function(){
-				self.conn.query("COMMIT", function(){
+				kvSubCachePut = {};
+				kvSubCacheDel = {};
+				conn.query("COMMIT", function(){
+					console.log('batch committed')
 					savepoint_index = 0;
+					rollbackeds = [];
 					bCommit = false;
-					bInBatch = false;
-					db.unflagOnGoingBatch();
-					self.conn.release();
-					self.conn = null;
-					cb();
+					bOngoingBatch= false;
+					bOngoingSubBatch = false;
+
+					//db.unflagOnGoingBatch();
+					conn.release();
+					conn = null;
+					if (cb)
+						cb();
+					nextSubatch();
 				});
 			});
 		}
-		else
-			cb();
+		else {
+			bOngoingSubBatch = false;
+			console.log('not committed yet ' + bOngoingSubBatch)
+
+			if (cb)
+				cb();
+			nextSubatch();
+		}
+
+		function nextSubatch(){
+
+			if (arrSubBatches.length === 0)
+				return;
+			exports.startSubBatch(arrSubBatches.shift());
+		}
 	}
 
 }
@@ -176,3 +265,5 @@ var createReadStream = function(options){
 }
 
 util.inherits(createReadStream, EventEmitter);
+
+exports.hasOnGoingBatch = function() {return bOngoingBatch;};

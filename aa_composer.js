@@ -17,6 +17,7 @@ var eventBus = require('./event_bus.js');
 var mutex = require('./mutex.js');
 var writer = require('./writer.js');
 var conf = require('./conf.js');
+var batcher = require('./batcher.js');
 
 var getFormula = require('./formula/common.js').getFormula;
 var hasCases = require('./formula/common.js').hasCases;
@@ -1616,8 +1617,8 @@ function checkStorageSizes() {
 
 function checkBalances() {
 	mutex.lockOrSkip(['checkBalances'], function (unlock) {
-		db.takeConnectionFromPool(function (conn) { // block conection for the entire duration of the check
-			conn.query("SELECT 1 FROM aa_triggers", function (rows) {
+		batcher.startSubBatch(function (subBatch) { // block conection for the entire duration of the check
+			subBatch.sql.query("SELECT 1 FROM aa_triggers", function (rows) {
 				if (rows.length > 0) {
 					console.log("skipping checkBalances because there are unhandled triggers");
 					conn.release();
@@ -1655,14 +1656,14 @@ function checkBalances() {
 				async.eachSeries(
 					[sql_base, sql_assets_balances_to_outputs, sql_assets_outputs_to_balances],
 					function (sql, cb) {
-						conn.query(sql, function (rows) {
+						subBatch.sql.query(sql, function (rows) {
 							if (rows.length > 0)
 								throw Error("checkBalances failed: sql:\n" + sql + "\n\nrows:\n" + JSON.stringify(rows, null, '\t'));
 							cb();
 						});
 					},
 					function () {
-						conn.release();
+						subBatch.release();
 						unlock();
 					}
 				);

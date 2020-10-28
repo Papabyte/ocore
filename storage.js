@@ -11,6 +11,7 @@ var archiving = require('./archiving.js');
 var eventBus = require('./event_bus.js');
 var profiler = require('./profiler.js');
 var ValidationUtils = require("./validation_utils.js");
+var batcher = require('./batcher.js');
 
 var testnetAssetsDefinedByAAsAreVisibleImmediatelyUpgradeMci = 1167000;
 
@@ -1108,7 +1109,7 @@ function readLastStableMcIndex(conn, handleLastStableMcIndex){
 
 
 function readLastMainChainIndex(handleLastMcIndex){
-	db.query("SELECT MAX(main_chain_index) AS last_mc_index FROM units", function(rows){
+	batcher.query("SELECT MAX(main_chain_index) AS last_mc_index FROM units", function(rows){
 		var last_mc_index = rows[0].last_mc_index;
 		if (last_mc_index === null) // empty database
 			last_mc_index = 0;

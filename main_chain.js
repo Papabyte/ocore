@@ -35,7 +35,9 @@ function updateMainChain(conn, batch, from_unit, last_added_unit, bKeepStability
 	
 	// if unit === null, read free balls
 	function findNextUpMainChainUnit(unit, handleUnit){
+		console.log('findNextUpMainChainUnit ' + unit)
 		function handleProps(props){
+			console.log('handleProps')
 			if (props.best_parent_unit === null)
 				throw Error("best parent is null");
 			console.log("unit "+unit+", best parent "+props.best_parent_unit+", wlevel "+props.witnessed_level);

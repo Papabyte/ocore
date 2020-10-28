@@ -199,16 +199,19 @@ function validate(objJoint, callbacks, externalSubBatch) {
 		async.series(
 			[
 				function(cb){
-					if (externalSubBatch.sql) {
+					if (externalSubBatch) {
 						subBatch = externalSubBatch;
 						start_time = Date.now();
 						commit_fn = function (cb2) { cb2(); };
 						return cb();
 					}
-					batcher.startsubBatch.sql(function(newsubBatch){
+					console.log("start sub batch for unit " + objJoint.unit.unit)
+					batcher.startSubBatch(function(newsubBatch){
 						subBatch = newsubBatch;
 						start_time = Date.now();
 						commit_fn = function (cb2) {
+							console.log("commit_fn for unit " + objJoint.unit.unit)
+
 							if (objValidationState.bAdvancedLastStableMci)
 								subBatch.release(cb2);
 							else
@@ -220,7 +223,7 @@ function validate(objJoint, callbacks, externalSubBatch) {
 				},
 				function(cb){
 					profiler.start();
-					checkDuplicate(subBatch.sql, objUnit, cb);
+					checkDuplicate(subBatch, objUnit, cb);
 				},
 				function(cb){
 					profiler.stop('validation-checkDuplicate');
@@ -232,48 +235,48 @@ function validate(objJoint, callbacks, externalSubBatch) {
 					profiler.start();
 					!objUnit.parent_units
 						? cb()
-						: validateHashTreeBall(subBatch.sql, objJoint, cb);
+						: validateHashTreeBall(subBatch, objJoint, cb);
 				},
 				function(cb){
 					profiler.stop('validation-hash-tree-ball');
 					profiler.start();
 					!objUnit.parent_units
 						? cb()
-						: validateParentsExistAndOrdered(subBatch.sql, objUnit, cb);
+						: validateParentsExistAndOrdered(subBatch, objUnit, cb);
 				},
 				function(cb){
 					profiler.stop('validation-parents-exist');
 					profiler.start();
 					!objUnit.parent_units
 						? cb()
-						: validateHashTreeParentsAndSkiplist(subBatch.sql, objJoint, cb);
+						: validateHashTreeParentsAndSkiplist(subBatch, objJoint, cb);
 				},
 				function(cb){
 					profiler.stop('validation-hash-tree-parents');
 				//	profiler.start(); // conflicting with profiling in determineIfStableInLaterUnitsAndUpdateStableMcFlag
 					!objUnit.parent_units
 						? cb()
-						: validateParents(subBatch.sql, objJoint, objValidationState, cb);
+						: validateParents(subBatch, objJoint, objValidationState, cb);
 				},
 				function(cb){
 				//	profiler.stop('validation-parents');
 					profiler.start();
 					!objJoint.skiplist_units
 						? cb()
-						: validateSkiplist(subBatch.sql, objJoint.skiplist_units, cb);
+						: validateSkiplist(subBatch, objJoint.skiplist_units, cb);
 				},
 				function(cb){
 					profiler.stop('validation-skiplist');
-					validateWitnesses(subBatch.sql, objUnit, objValidationState, cb);
+					validateWitnesses(subBatch, objUnit, objValidationState, cb);
 				},
 				function(cb){
 					profiler.start();
-					validateAuthors(subBatch.sql, objUnit.authors, objUnit, objValidationState, cb);
+					validateAuthors(subBatch, objUnit.authors, objUnit, objValidationState, cb);
 				},
 				function(cb){
 					profiler.stop('validation-authors');
 					profiler.start();
-					objUnit.content_hash ? cb() : validateMessages(subBatch.sql, objUnit.messages, objUnit, objValidationState, cb);
+					objUnit.content_hash ? cb() : validateMessages(subBatch, objUnit.messages, objUnit, objValidationState, cb);
 				}
 			], 
 			function(err){
@@ -286,8 +289,8 @@ function validate(objJoint, callbacks, externalSubBatch) {
 						var consumed_time = Date.now()-start_time;
 						profiler.add_result('failed validation', consumed_time);
 						console.log(objUnit.unit+" validation "+JSON.stringify(err)+" took "+consumed_time+"ms");
-						if (!externalsubBatch.sql)
-							subBatch.sql.release();
+						//if (!externalSubBatch)
+						//	subBatch.release();
 						unlock();
 						if (typeof err === "object"){
 							if (err.error_code === "unresolved_dependency")
@@ -789,7 +792,7 @@ function validateAuthors(subBatch, arrAuthors, objUnit, objValidationState, call
 	objValidationState.unit_hash_to_sign = objectHash.getUnitHashToSign(objUnit);
 	
 	async.eachSeries(arrAuthors, function(objAuthor, cb){
-		validateAuthor(subBatch.sql, objAuthor, objUnit, objValidationState, cb);
+		validateAuthor(subBatch, objAuthor, objUnit, objValidationState, cb);
 	}, callback);
 }
 
@@ -1139,7 +1142,7 @@ function validateMessages(subBatch, arrMessages, objUnit, objValidationState, ca
 	async.forEachOfSeries(
 		arrMessages, 
 		function(objMessage, message_index, cb){
-			validateMessage(subBatch.sql, objMessage, message_index, objUnit, objValidationState, cb); 
+			validateMessage(subBatch, objMessage, message_index, objUnit, objValidationState, cb); 
 		}, 
 		function(err){
 			if (err)
@@ -1244,7 +1247,7 @@ function validateMessage(subBatch, objMessage, message_index, objUnit, objValida
 	
 	function validatePayload(cb){
 		if (objMessage.payload_location === "inline"){
-			validateInlinePayload(subBatch.sql, objMessage, message_index, objUnit, objValidationState, cb);
+			validateInlinePayload(subBatch, objMessage, message_index, objUnit, objValidationState, cb);
 		}
 		else{
 			if (!isValidBase64(objMessage.payload_hash, constants.HASH_LENGTH))
@@ -1261,7 +1264,7 @@ function validateMessage(subBatch, objMessage, message_index, objUnit, objValida
 				" AND address="+subBatch.sql.escape(objSpendProof.address ? objSpendProof.address : objUnit.authors[0].address);
 		});
 		var doubleSpendIndexMySQL = conf.storage == "mysql" ? "USE INDEX(bySpendProof)" : "";
-		checkForDoublespends(subBatch.sql, "spend proof", 
+		checkForDoublespends(subBatch, "spend proof", 
 			"SELECT address, unit, main_chain_index, sequence FROM spend_proofs "+ doubleSpendIndexMySQL+" JOIN units USING(unit) WHERE unit != ? AND ("+arrEqs.join(" OR ")+")",
 			[objUnit.unit], 
 			objUnit, objValidationState, function(cb2){ cb2(); }, cb);
@@ -1529,7 +1532,7 @@ function validateInlinePayload(subBatch, objMessage, message_index, objUnit, obj
 			break;
 
 		case "payment":
-			validatePayment(subBatch.sql, payload, message_index, objUnit, objValidationState, callback);
+			validatePayment(subBatch, payload, message_index, objUnit, objValidationState, callback);
 			break;
 
 		default:
@@ -1551,7 +1554,7 @@ function validatePayment(subBatch, payload, message_index, objUnit, objValidatio
 		if (objValidationState.bHasBasePayment)
 			return callback("can have only one base payment");
 		objValidationState.bHasBasePayment = true;
-		return validatePaymentInputsAndOutputs(subBatch.sql, payload, null, message_index, objUnit, objValidationState, callback);
+		return validatePaymentInputsAndOutputs(subBatch, payload, null, message_index, objUnit, objValidationState, callback);
 	}
 	
 	// asset
@@ -1599,7 +1602,7 @@ function validatePayment(subBatch, payload, message_index, objUnit, objValidatio
 			if (bIssue && objAsset.arrAttestedAddresses.indexOf(issuer_address) === -1)
 				return callback("issuer is not attested");
 		}
-		validatePaymentInputsAndOutputs(subBatch.sql, payload, objAsset, message_index, objUnit, objValidationState, callback);
+		validatePaymentInputsAndOutputs(subBatch, payload, objAsset, message_index, objUnit, objValidationState, callback);
 	});
 }
 
@@ -1740,7 +1743,7 @@ function validatePaymentInputsAndOutputs(subBatch, payload, objAsset, message_in
 					doubleSpendWhere += " AND asset IS NULL";
 				var doubleSpendQuery = "SELECT "+doubleSpendFields+" FROM inputs " + doubleSpendIndexMySQL + " JOIN units USING(unit) WHERE "+doubleSpendWhere;
 				checkForDoublespends(
-					subBatch.sql, "divisible input", 
+					subBatch, "divisible input", 
 					doubleSpendQuery, doubleSpendVars, 
 					objUnit, objValidationState, 
 					function acceptDoublespends(cb3){

@@ -9,7 +9,7 @@ var mutex = require('./mutex.js');
 var validation = require('./validation.js');
 var witnessProof = require('./witness_proof.js');
 var proofChain = require('./proof_chain.js');
-
+var batcher = require('./batcher.js');
 var MAX_CATCHUP_CHAIN_LENGTH = 1000000; // how many MCIs long
 
 
@@ -337,13 +337,12 @@ function processHashTree(arrBalls, callbacks){
 		return callbacks.ifError("no balls array");
 	mutex.lock(["hash_tree"], function(unlock){
 		
-		db.query("SELECT 1 FROM hash_tree_balls LIMIT 1", function(ht_rows){
+	//	db.query("SELECT 1 FROM hash_tree_balls LIMIT 1", function(ht_rows){
 			//if (ht_rows.length > 0) // duplicate
 			//    return unlock();
 			
-			db.takeConnectionFromPool(function(conn){
+			batcher.startSubBatch(function(batcher){
 				
-				conn.query("BEGIN", function(){
 					
 					var max_mci = null;
 					async.eachSeries(
@@ -365,7 +364,7 @@ function processHashTree(arrBalls, callbacks){
 							function addBall(){
 								storage.assocHashTreeUnitsByBall[objBall.ball] = objBall.unit;
 								// insert even if it already exists in balls, because we need to define max_mci by looking outside this hash tree
-								conn.query("INSERT "+conn.getIgnore()+" INTO hash_tree_balls (ball, unit) VALUES(?,?)", [objBall.ball, objBall.unit], function(){
+								batcher.sql.query("INSERT "+batcher.sql.getIgnore()+" INTO hash_tree_balls (ball, unit) VALUES(?,?)", [objBall.ball, objBall.unit], function(){
 									cb();
 									//console.log("inserted unit "+objBall.unit, objBall.ball);
 								});
@@ -374,7 +373,7 @@ function processHashTree(arrBalls, callbacks){
 							function checkSkiplistBallsExist(){
 								if (!objBall.skiplist_balls)
 									return addBall();
-								conn.query(
+								batcher.sql.query(
 									"SELECT ball FROM hash_tree_balls WHERE ball IN(?) UNION SELECT ball FROM balls WHERE ball IN(?)",
 									[objBall.skiplist_balls, objBall.skiplist_balls],
 									function(rows){
@@ -387,13 +386,13 @@ function processHashTree(arrBalls, callbacks){
 
 							if (!objBall.parent_balls)
 								return checkSkiplistBallsExist();
-							conn.query("SELECT ball FROM hash_tree_balls WHERE ball IN(?)", [objBall.parent_balls], function(rows){
+							batcher.sql.query("SELECT ball FROM hash_tree_balls WHERE ball IN(?)", [objBall.parent_balls], function(rows){
 								//console.log(rows.length+" rows", objBall.parent_balls);
 								if (rows.length === objBall.parent_balls.length)
 									return checkSkiplistBallsExist();
 								var arrFoundBalls = rows.map(function(row) { return row.ball; });
 								var arrMissingBalls = _.difference(objBall.parent_balls, arrFoundBalls);
-								conn.query(
+								batcher.sql.query(
 									"SELECT ball, main_chain_index, is_on_main_chain FROM balls JOIN units USING(unit) WHERE ball IN(?)", 
 									[arrMissingBalls], 
 									function(rows2){
@@ -412,11 +411,11 @@ function processHashTree(arrBalls, callbacks){
 						function(error){
 							
 							function finish(err){
-								conn.query(err ? "ROLLBACK" : "COMMIT", function(){
-									conn.release();
-									unlock();
-									err ? callbacks.ifError(err) : callbacks.ifOk();
-								});
+								if (err)
+									batcher.rollback();
+								else
+									batcher.release();
+
 							}
 
 							if (error)
@@ -427,7 +426,7 @@ function processHashTree(arrBalls, callbacks){
 							//    return finish("max_mci not defined");
 							
 							// check that the received tree matches the first pair of chain elements
-							conn.query(
+							batcher.sql.query(
 								"SELECT ball, main_chain_index \n\
 								FROM catchup_chain_balls LEFT JOIN balls USING(ball) LEFT JOIN units USING(unit) \n\
 								ORDER BY member_index LIMIT 2", 
@@ -441,17 +440,16 @@ function processHashTree(arrBalls, callbacks){
 									if (rows[1].ball !== arrBalls[arrBalls.length-1].ball)
 										return finish("tree root doesn't match second chain element");
 									// remove the oldest chain element, we now have hash tree instead
-									conn.query("DELETE FROM catchup_chain_balls WHERE ball=?", [rows[0].ball], function(){
+									batcher.sql.query("DELETE FROM catchup_chain_balls WHERE ball=?", [rows[0].ball], function(){
 										
-										purgeHandledBallsFromHashTree(conn, finish);
+										purgeHandledBallsFromHashTree(batcher.sql, finish);
 									});
 								}
 							);
 						}
 					);
-				});
 			});
-		});
+		//});
 	});
 }
 
