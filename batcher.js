@@ -29,6 +29,7 @@ var arrSubBatches = [];
 
 var rollbackeds = [];
 
+exports.getUnixTimestamp = db.getUnixTimestamp;
 exports.query = function(sql, args, cb) {
 	if (bOngoingBatch || waitingConnection){
 		if (waitingConnection)
@@ -50,7 +51,7 @@ exports.query = function(sql, args, cb) {
 	}
 }
 
-exports.startSubBatch = function(callback){
+exports.startSubBatch = function(callback, bPriority){
 	console.log('start new batch ' + bOngoingBatch + ' ' + bOngoingSubBatch + ' current index ' + savepoint_index)
 
 	if (!bOngoingBatch && !waitingConnection){
@@ -95,7 +96,11 @@ exports.startSubBatch = function(callback){
 		});
 	} else {
 		console.log('subbatch ongoing, will queue');
-		arrSubBatches.push(callback);
+		if(bPriority)
+			arrSubBatches.unshift(callback);
+		else
+			arrSubBatches.push(callback);
+
 		//throw Error('on going sub batch');
 	}
 

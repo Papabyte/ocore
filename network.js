@@ -1225,6 +1225,8 @@ function handleOnlineJoint(ws, objJoint, onDone){
 function handleSavedJoint(objJoint, creation_ts, peer){
 	
 	var unit = objJoint.unit.unit;
+
+	console.log("handle saved joint " + unit);
 	var ws = getPeerWebSocket(peer);
 	if (ws && ws.readyState !== ws.OPEN)
 		ws = null;
@@ -1795,7 +1797,7 @@ function onNewAA(objUnit) {
 // catchup
 
 function checkCatchupLeftovers(){
-	db.query(
+	batcher.query(
 		"SELECT 1 FROM hash_tree_balls \n\
 		UNION \n\
 		SELECT 1 FROM catchup_chain_balls \n\
@@ -1887,6 +1889,7 @@ function handleCatchupChain(ws, request, response){
 // hash tree
 
 function requestNextHashTree(ws){
+	console.log('requestNextHashTree');
 	eventBus.emit('catchup_next_hash_tree');
 	batcher.query("SELECT ball FROM catchup_chain_balls ORDER BY member_index LIMIT 2", function(rows){
 		if (rows.length === 0)
@@ -1936,10 +1939,13 @@ function haveManyUnhandledHashTreeBalls(){
 		var unit = storage.assocHashTreeUnitsByBall[ball];
 		if (!storage.assocUnstableUnits[unit]){
 			count++;
-			if (count > 30)
+			if (count > 30){
+				console.log('haveManyUnhandledHashTreeBalls ' + count);
 				return true;
+			}
 		}
 	}
+	console.log('not haveManyUnhandledHashTreeBalls'  + count);
 	return false;
 }
 

@@ -2308,14 +2308,14 @@ function checkAttestorList(arrAttestors){
 
 
 
-function validateAuthorSignaturesWithoutReferences(objAuthor, objUnit, arrAddressDefinition, callback){
+function validateAuthorSignaturesWithoutReferences(conn, objAuthor, objUnit, arrAddressDefinition, callback){
 	var objValidationState = {
 		unit_hash_to_sign: objectHash.getUnitHashToSign(objUnit),
 		last_ball_mci: -1,
 		bNoReferences: true
 	};
 	Definition.validateAuthentifiers(
-		null, objAuthor.address, null, arrAddressDefinition, objUnit, objValidationState, objAuthor.authentifiers, 
+		conn, objAuthor.address, null, arrAddressDefinition, objUnit, objValidationState, objAuthor.authentifiers, 
 		function(err, res){
 			if (err) // error in address definition
 				return callback(err);

@@ -53,15 +53,11 @@ function checkIfNewJoint(objJoint, callbacks) {
 
 
 function removeUnhandledJointAndDependencies(unit, onDone){
-	db.takeConnectionFromPool(function(conn){
-		var arrQueries = [];
-		conn.addQuery(arrQueries, "BEGIN");
-		conn.addQuery(arrQueries, "DELETE FROM unhandled_joints WHERE unit=?", [unit]);
-		conn.addQuery(arrQueries, "DELETE FROM dependencies WHERE unit=?", [unit]);
-		conn.addQuery(arrQueries, "COMMIT");
-		async.series(arrQueries, function(){
+	batcher.startSubBatch(function(subBatch){
+		subBatch.sql.query("DELETE FROM unhandled_joints WHERE unit=?", [unit]);
+		subBatch.sql.query("DELETE FROM dependencies WHERE unit=?", [unit]);
+		subBatch.release(function(){
 			delete assocUnhandledUnits[unit];
-			conn.release();
 			if (onDone)
 				onDone();
 		});
@@ -71,27 +67,24 @@ function removeUnhandledJointAndDependencies(unit, onDone){
 function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer, onDone){
 	var unit = objJoint.unit.unit;
 	assocUnhandledUnits[unit] = true;
-	db.takeConnectionFromPool(function(conn){
-		var sql = "INSERT "+conn.getIgnore()+" INTO dependencies (unit, depends_on_unit) VALUES " + arrMissingParentUnits.map(function(missing_unit){
-			return "("+conn.escape(unit)+", "+conn.escape(missing_unit)+")";
+	batcher.startSubBatch(function(subBatch){
+		var sql = "INSERT "+subBatch.sql.getIgnore()+" INTO dependencies (unit, depends_on_unit) VALUES " + arrMissingParentUnits.map(function(missing_unit){
+			return "("+subBatch.sql.escape(unit)+", "+subBatch.sql.escape(missing_unit)+")";
 		}).join(", ");
-		var arrQueries = [];
-		conn.addQuery(arrQueries, "BEGIN");
-		conn.addQuery(arrQueries, "INSERT "+conn.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
-		conn.addQuery(arrQueries, sql);
-		conn.addQuery(arrQueries, "COMMIT");
-		async.series(arrQueries, function(){
-			conn.release();
+		subBatch.sql.query("INSERT "+subBatch.sql.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
+		subBatch.sql.query(sql);
+		subBatch.release(function(){
+			console.log('saveUnhandledJointAndDependencies ' + unit + ' done');
 			if (onDone)
 				onDone();
-		});
-	});
+		})
+	}, true);
 }
 
 
 // handleDependentJoint called for each dependent unit
 function readDependentJointsThatAreReady(unit, handleDependentJoint){
-	//console.log("readDependentJointsThatAreReady "+unit);
+	console.log("readDependentJointsThatAreReady "+unit);
 	var t=Date.now();
 	var from = unit ? "FROM dependencies AS src_deps JOIN dependencies USING(unit)" : "FROM dependencies";
 	var where = unit ? "WHERE src_deps.depends_on_unit="+db.escape(unit) : "";
@@ -300,7 +293,7 @@ function readJointsSinceMci(mci, handleJoint, onDone){
 			async.eachSeries(
 				rows, 
 				function(row, cb){
-					storage.readJoint(db, row.unit, {
+					storage.readJoint(batcher, row.unit, {
 						ifNotFound: function(){
 						//	throw Error("unit "+row.unit+" not found");
 							breadcrumbs.add("unit "+row.unit+" not found");

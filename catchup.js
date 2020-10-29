@@ -196,13 +196,13 @@ function processCatchupChain(catchupChain, peer, arrWitnesses, callbacks){
 				function(cb){
 					mutex.lock(["catchup_chain"], function(_unlock){
 						unlock = _unlock;
-						db.query("SELECT 1 FROM catchup_chain_balls LIMIT 1", function(rows){
+						batcher.query("SELECT 1 FROM catchup_chain_balls LIMIT 1", function(rows){
 							(rows.length > 0) ? cb("duplicate") : cb();
 						});
 					});
 				},
 				function(cb){ // adjust first chain ball if necessary and make sure it is the only stable unit in the entire chain
-					db.query(
+					batcher.query(
 						"SELECT is_stable, is_on_main_chain, main_chain_index FROM balls JOIN units USING(unit) WHERE ball=?", 
 						[arrChainBalls[0]], 
 						function(rows){
@@ -216,7 +216,7 @@ function processCatchupChain(catchupChain, peer, arrWitnesses, callbacks){
 								return cb("first chain ball "+arrChainBalls[0]+" is not stable");
 							if (objFirstChainBallProps.is_on_main_chain !== 1)
 								return cb("first chain ball "+arrChainBalls[0]+" is not on mc");
-							storage.readLastStableMcUnitProps(db, function(objLastStableMcUnitProps){
+							storage.readLastStableMcUnitProps(batcher, function(objLastStableMcUnitProps){
 								var last_stable_mci = objLastStableMcUnitProps.main_chain_index;
 								if (objFirstChainBallProps.main_chain_index > last_stable_mci) // duplicate check
 									return cb("first chain ball "+arrChainBalls[0]+" mci is too large");
@@ -225,7 +225,7 @@ function processCatchupChain(catchupChain, peer, arrWitnesses, callbacks){
 								arrChainBalls[0] = objLastStableMcUnitProps.ball; // replace to avoid receiving duplicates
 								if (!arrChainBalls[1])
 									return cb();
-								db.query("SELECT is_stable FROM balls JOIN units USING(unit) WHERE ball=?", [arrChainBalls[1]], function(rows2){
+									batcher.query("SELECT is_stable FROM balls JOIN units USING(unit) WHERE ball=?", [arrChainBalls[1]], function(rows2){
 									if (rows2.length === 0)
 										return cb();
 									var objSecondChainBallProps = rows2[0];
@@ -239,7 +239,7 @@ function processCatchupChain(catchupChain, peer, arrWitnesses, callbacks){
 				},
 				function(cb){ // validation complete, now write the chain for future downloading of hash trees
 					var arrValues = arrChainBalls.map(function(ball){ return "("+db.escape(ball)+")"; });
-					db.query("INSERT INTO catchup_chain_balls (ball) VALUES "+arrValues.join(', '), function(){
+					batcher.query("INSERT INTO catchup_chain_balls (ball) VALUES "+arrValues.join(', '), function(){
 						cb();
 					});
 				}
@@ -264,7 +264,7 @@ function readHashTree(hashTreeRequest, callbacks){
 	var start_ts = Date.now();
 	var from_mci;
 	var to_mci;
-	db.query(
+	batcher.query(
 		"SELECT is_stable, is_on_main_chain, main_chain_index, ball FROM balls JOIN units USING(unit) WHERE ball IN(?,?)", 
 		[from_ball, to_ball], 
 		function(rows){
@@ -285,7 +285,7 @@ function readHashTree(hashTreeRequest, callbacks){
 				return callbacks.ifError("from is after to");
 			var arrBalls = [];
 			var op = (from_mci === 0) ? ">=" : ">"; // if starting from 0, add genesis itself
-			db.query(
+			batcher.query(
 				"SELECT unit, ball, content_hash FROM units LEFT JOIN balls USING(unit) \n\
 				WHERE main_chain_index "+op+" ? AND main_chain_index<=? ORDER BY main_chain_index, `level`", 
 				[from_mci, to_mci], 
@@ -298,7 +298,7 @@ function readHashTree(hashTreeRequest, callbacks){
 							if (objBall.content_hash)
 								objBall.is_nonserial = true;
 							delete objBall.content_hash;
-							db.query(
+							batcher.query(
 								"SELECT ball FROM parenthoods LEFT JOIN balls ON parent_unit=balls.unit WHERE child_unit=? ORDER BY ball", 
 								[objBall.unit],
 								function(parent_rows){
@@ -306,7 +306,7 @@ function readHashTree(hashTreeRequest, callbacks){
 										throw Error("some parents have no balls");
 									if (parent_rows.length > 0)
 										objBall.parent_balls = parent_rows.map(function(parent_row){ return parent_row.ball; });
-									db.query(
+									batcher.query(
 										"SELECT ball FROM skiplist_units LEFT JOIN balls ON skiplist_unit=balls.unit WHERE skiplist_units.unit=? ORDER BY ball", 
 										[objBall.unit],
 										function(srows){
@@ -415,7 +415,8 @@ function processHashTree(arrBalls, callbacks){
 									batcher.rollback();
 								else
 									batcher.release();
-
+								unlock();
+								err ? callbacks.ifError(err) : callbacks.ifOk();
 							}
 
 							if (error)
