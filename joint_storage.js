@@ -52,7 +52,45 @@ function checkIfNewJoint(objJoint, callbacks) {
 }
 
 
+
 function removeUnhandledJointAndDependencies(unit, onDone){
+	batcher.startSubBatch(function(subBatch){
+		var arrQueries = [];
+		subBatch.sql.addQuery(arrQueries, "DELETE FROM unhandled_joints WHERE unit=?", [unit]);
+		subBatch.sql.addQuery(arrQueries, "DELETE FROM dependencies WHERE unit=?", [unit]);
+		async.series(arrQueries, function(){
+			subBatch.release(function(){
+				delete assocUnhandledUnits[unit];
+				if (onDone)
+					onDone();
+			});
+		});
+	});
+}
+
+function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer, onDone){
+	var unit = objJoint.unit.unit;
+	assocUnhandledUnits[unit] = true;
+	batcher.startSubBatch(function(subBatch){
+		var sql = "INSERT "+subBatch.sql.getIgnore()+" INTO dependencies (unit, depends_on_unit) VALUES " + arrMissingParentUnits.map(function(missing_unit){
+			return "("+subBatch.sql.escape(unit)+", "+subBatch.sql.escape(missing_unit)+")";
+		}).join(", ");
+		var arrQueries = [];
+		subBatch.sql.addQuery(arrQueries, "INSERT "+subBatch.sql.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
+		subBatch.sql.addQuery(arrQueries, sql);
+		async.series(arrQueries, function(){
+			subBatch.release(function(){
+				if (onDone)
+					onDone();
+			});
+		});
+	});
+}
+
+
+/*
+function removeUnhandledJointAndDependencies(unit, onDone){
+	console.log("will remove " + unit + " from dependencies");
 	batcher.startSubBatch(function(subBatch){
 		subBatch.sql.query("DELETE FROM unhandled_joints WHERE unit=?", [unit]);
 		subBatch.sql.query("DELETE FROM dependencies WHERE unit=?", [unit]);
@@ -74,13 +112,13 @@ function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer
 		subBatch.sql.query("INSERT "+subBatch.sql.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
 		subBatch.sql.query(sql);
 		subBatch.release(function(){
-			console.log('saveUnhandledJointAndDependencies ' + unit + ' done');
+			console.log('saveUnhandledJointAndDependencies for ' + unit + ' done');
 			if (onDone)
 				onDone();
 		})
-	}, true);
+	});
 }
-
+*/
 
 // handleDependentJoint called for each dependent unit
 function readDependentJointsThatAreReady(unit, handleDependentJoint){
@@ -101,7 +139,7 @@ function readDependentJointsThatAreReady(unit, handleDependentJoint){
 			HAVING count_missing_parents=0 \n\
 			ORDER BY NULL", 
 			function(rows){
-				//console.log(rows.length+" joints are ready");
+				console.log(rows.length+" joints are ready");
 				//console.log("deps: "+(Date.now()-t));
 				rows.forEach(function(row) {
 					batcher.query("SELECT json, peer, "+db.getUnixTimestamp("creation_date")+" AS creation_ts FROM unhandled_joints WHERE unit=?", [row.unit_for_json], function(internal_rows){
@@ -246,9 +284,7 @@ function purgeUncoveredNonserialJoints(bByExistenceOfChildren, onDone){
 							ifFound: function (objJoint) {
 								mutex.lock(["write"], function(unlock){
 									var arrQueries = [];
-									subBatch.sql.addQuery(arrQueries, "BEGIN");
-									archiving.generateQueriesToArchiveJoint(conn, objJoint, 'uncovered', arrQueries, function(){
-										conn.addQuery(arrQueries, "COMMIT");
+									archiving.generateQueriesToArchiveJoint(subBatch.sql, objJoint, 'uncovered', arrQueries, function(){
 										subBatch.kv.del('j\n'+row.unit, function(){
 											async.series(arrQueries, function(){
 												breadcrumbs.add("------- done archiving "+row.unit);

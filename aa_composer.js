@@ -50,7 +50,7 @@ eventBus.on('new_aa_triggers', function () {
 
 function handleAATriggers() {
 	mutex.lock(['aa_triggers'], function (unlock) {
-		db.query(
+		batcher.query(
 			"SELECT aa_triggers.mci, aa_triggers.unit, address, definition \n\
 			FROM aa_triggers \n\
 			CROSS JOIN units USING(unit) \n\
@@ -77,44 +77,38 @@ function handleAATriggers() {
 }
 
 function handlePrimaryAATrigger(mci, unit, address, arrDefinition, arrPostedUnits, onDone) {
-	db.takeConnectionFromPool(function (conn) {
-		conn.query("BEGIN", function () {
-			var batch = kvstore.batch();
-			readMcUnit(conn, mci, function (objMcUnit) {
-				readUnit(conn, unit, function (objUnit) {
+	batcher.startSubBatch(function (subBatch) {
+			readMcUnit(subBatch.sql, mci, function (objMcUnit) {
+				readUnit(subBatch.sql, unit, function (objUnit) {
 					var arrResponses = [];
 					var trigger = getTrigger(objUnit, address);
 					trigger.initial_address = trigger.address;
 					trigger.initial_unit = trigger.unit;
-					handleTrigger(conn, batch, trigger, {}, {}, arrDefinition, address, mci, objMcUnit, false, arrResponses, function(){
-						conn.query("DELETE FROM aa_triggers WHERE mci=? AND unit=? AND address=?", [mci, unit, address], function(){
-							var batch_start_time = Date.now();
-							batch.write(function(err){
-								console.log("AA batch write took "+(Date.now()-batch_start_time)+'ms');
-								if (err)
-									throw Error("AA composer: batch write failed: "+err);
-								conn.query("COMMIT", function () {
-									conn.release();
-									// copy updatedStateVars to all responses
-									if (arrResponses.length > 1 && arrResponses[0].updatedStateVars)
-										for (var i = 1; i < arrResponses.length; i++)
-											arrResponses[i].updatedStateVars = arrResponses[0].updatedStateVars;
-									arrResponses.forEach(function (objAAResponse) {
-										if (objAAResponse.objResponseUnit)
-											arrPostedUnits.push(objAAResponse.objResponseUnit);
-										eventBus.emit('aa_response', objAAResponse);
-										eventBus.emit('aa_response_to_unit-'+objAAResponse.trigger_unit, objAAResponse);
-										eventBus.emit('aa_response_to_address-'+objAAResponse.trigger_address, objAAResponse);
-										eventBus.emit('aa_response_from_aa-'+objAAResponse.aa_address, objAAResponse);
-									});
-									onDone();
+					handleTrigger(subBatch, trigger, {}, {}, arrDefinition, address, mci, objMcUnit, false, arrResponses, function(){
+						subBatch.sql.query("DELETE FROM aa_triggers WHERE mci=? AND unit=? AND address=?", [mci, unit, address], function(){
+							//var batch_start_time = Date.now();
+							console.log("AA batch write took "+(Date.now()-batch_start_time)+'ms');
+							if (err)
+								throw Error("AA composer: batch write failed: "+err);
+							subBatch.release(function () {
+								// copy updatedStateVars to all responses
+								if (arrResponses.length > 1 && arrResponses[0].updatedStateVars)
+									for (var i = 1; i < arrResponses.length; i++)
+										arrResponses[i].updatedStateVars = arrResponses[0].updatedStateVars;
+								arrResponses.forEach(function (objAAResponse) {
+									if (objAAResponse.objResponseUnit)
+										arrPostedUnits.push(objAAResponse.objResponseUnit);
+									eventBus.emit('aa_response', objAAResponse);
+									eventBus.emit('aa_response_to_unit-'+objAAResponse.trigger_unit, objAAResponse);
+									eventBus.emit('aa_response_to_address-'+objAAResponse.trigger_address, objAAResponse);
+									eventBus.emit('aa_response_from_aa-'+objAAResponse.aa_address, objAAResponse);
 								});
+								onDone();
 							});
 						});
 					});
 				});
 			});
-		});
 	});
 }
 
@@ -311,13 +305,12 @@ function getTrigger(objUnit, receiving_address) {
 }
 
 // the result is onDone(objResponseUnit, bBounced)
-function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, address, mci, objMcUnit, bSecondary, arrResponses, onDone) {
+function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, address, mci, objMcUnit, bSecondary, arrResponses, onDone) {
 	var trigger_opts;
 	if (arguments.length === 1) {
 		trigger_opts = conn;
 		conn = trigger_opts.conn;
-		batch = trigger_opts.batch;
-		trigger = trigger_opts.trigger;
+		subBatch = trigger_opts.subBatch;
 		params = trigger_opts.params;
 		stateVars = trigger_opts.stateVars;
 		arrDefinition = trigger_opts.arrDefinition;
