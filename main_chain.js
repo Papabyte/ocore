@@ -1142,12 +1142,12 @@ function determineIfStableInLaterUnitsAndUpdateStableMcFlag(subBatch, earlier_un
 		mutex.lock(["write"], function(unlock){
 			breadcrumbs.add('stable in parents, got write lock');
 			storage.readLastStableMcIndex(subBatch.sql, function(last_stable_mci){
-				storage.readUnitProps(conn, earlier_unit, function(objEarlierUnitProps){
+				storage.readUnitProps(subBatch.sql, earlier_unit, function(objEarlierUnitProps){
 					var new_last_stable_mci = objEarlierUnitProps.main_chain_index;
 					if (new_last_stable_mci <= last_stable_mci) // fix: it could've been changed by parallel tasks - No, our SQL transaction doesn't see the changes
 						throw Error("new last stable mci expected to be higher than existing");
 					var mci = last_stable_mci;
-					var batch = kvstore.batch();
+					var batch = subBatch.kv;
 					advanceLastStableMcUnitAndStepForward();
 
 					function advanceLastStableMcUnitAndStepForward(){

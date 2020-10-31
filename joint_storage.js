@@ -71,17 +71,22 @@ function removeUnhandledJointAndDependencies(unit, onDone){
 function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer, onDone){
 	var unit = objJoint.unit.unit;
 	assocUnhandledUnits[unit] = true;
-	batcher.startSubBatch(function(subBatch){
-		var sql = "INSERT "+subBatch.sql.getIgnore()+" INTO dependencies (unit, depends_on_unit) VALUES " + arrMissingParentUnits.map(function(missing_unit){
-			return "("+subBatch.sql.escape(unit)+", "+subBatch.sql.escape(missing_unit)+")";
-		}).join(", ");
-		var arrQueries = [];
-		subBatch.sql.addQuery(arrQueries, "INSERT "+subBatch.sql.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
-		subBatch.sql.addQuery(arrQueries, sql);
-		async.series(arrQueries, function(){
-			subBatch.release(function(){
-				if (onDone)
-					onDone();
+	console.log("will save dependencies for " + unit + " " + JSON.stringify(arrMissingParentUnits));
+	mutex.lock(["dependencies"], function(unlock){
+		batcher.startSubBatch(function(subBatch){
+			var sql = "INSERT "+subBatch.sql.getIgnore()+" INTO dependencies (unit, depends_on_unit) VALUES " + arrMissingParentUnits.map(function(missing_unit){
+				return "("+subBatch.sql.escape(unit)+", "+subBatch.sql.escape(missing_unit)+")";
+			}).join(", ");
+			var arrQueries = [];
+			subBatch.sql.addQuery(arrQueries, "INSERT "+subBatch.sql.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
+			subBatch.sql.addQuery(arrQueries, sql);
+			async.series(arrQueries, function(){
+				subBatch.release(function(){
+					console.log('done writing dependencies for ' + unit)
+					if (onDone)
+						onDone();
+					unlock();
+				});
 			});
 		});
 	});

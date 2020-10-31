@@ -53,9 +53,8 @@ function readUnit(unit, cb) {
 }
 
 function readJointJsonFromStorage(conn, unit, cb) {
-	var kvstore = require('./kvstore.js');
 	if (!bCordova)
-		return kvstore.get('j\n' + unit, cb);
+		return batcher.get('j\n' + unit, cb);
 	conn.query("SELECT json FROM joints WHERE unit=?", [unit], function (rows) {
 		cb((rows.length === 0) ? null : rows[0].json);
 	});
@@ -916,8 +915,7 @@ function parseStateVar(type_and_value) {
 }
 
 function readAAStateVar(address, var_name, handleResult) {
-	var kvstore = require('./kvstore.js');
-	kvstore.get("st\n" + address + "\n" + var_name, function (type_and_value) {
+	batcher.get("st\n" + address + "\n" + var_name, function (type_and_value) {
 		if (type_and_value === undefined)
 			return handleResult();
 		handleResult(parseStateVar(type_and_value));

@@ -309,7 +309,7 @@ function readDataFeedByAddress(address, feed_name, value, min_mci, max_mci, ifse
 			objResult.mci = mci;
 		}
 	};
-	kvstore.createReadStream(options)
+	batcher.createReadStream(options)
 	.on('data', handleData)
 	.on('end', function(){
 		handleResult(objResult.bAbortedBecauseOfSeveral);

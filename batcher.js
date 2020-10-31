@@ -124,7 +124,6 @@ exports.startSubBatch = function(callback){
 
 			sql: {
 				query: function(sql, args, cb){
-
 					if (cb)
 						conn.query(sql, args, cb)
 					else
@@ -140,21 +139,29 @@ exports.startSubBatch = function(callback){
 				getFromUnixTime: conn.getFromUnixTime,
 				getIgnore: conn.getIgnore,
 				escape: conn.escape,
-				dropTemporaryTable: conn.dropTemporaryTable
+				dropTemporaryTable: conn.dropTemporaryTable,
+				getUnixTimestamp: conn.getUnixTimestamp
 		
 			},
 			kv: {
-				get: function(key, cb){
+				get: function(key, cb){ 
+					console.log("look for key " + key);
 					if (kvSubCachePut[key]){
 						console.log(key + " found in kvSubCachePut")
-						return cb(null, kvSubCachePut[key]);
-					}
-					else if (kvSubCacheDel[key]){
+						return cb(kvSubCachePut[key]);
+					} else if (kvSubCacheDel[key]){
 						console.log(key + " deleted in kvSubCachePut")
-						return cb({notFound: true, type: 'NotFoundError'});
+						return cb();
+					} else if (kvCachePut[key]){
+						console.log(key + " found in kvCachePut")
+						return cb(kvCachePut[key]);
+					}
+					else if (kvCacheDel[key]){
+						console.log(key + " deleted in kvCacheDel")
+						return cb();
 					}
 					else {
-						console.log(key + " not found in kvSubCachePut")
+						console.log("look for key " + key + " in store");
 						return kvstore.get(key, cb);
 					}
 				},
@@ -166,6 +173,12 @@ exports.startSubBatch = function(callback){
 					kvSubCacheDel[key] = true;
 					delete kvSubCachePut[key];
 				},
+				clear: function(){
+					for (var key in kvSubCachePut)
+						delete kvSubCachePut[key];
+					for (var key in kvSubCacheDel)
+						delete kvSubCacheDel[key];
+				},
 				write: function(cb){
 					console.log("write kv subbatch")
 					for (var key in kvSubCacheDel){
@@ -176,8 +189,10 @@ exports.startSubBatch = function(callback){
 						batch.put(key, kvSubCachePut[key]);
 						kvCachePut[key] = kvSubCachePut[key];
 					}
-					kvSubCachePut = {};
-					kvSubCacheDel = {};
+					for (var key in kvSubCachePut)
+						delete kvSubCachePut[key];
+					for (var key in kvSubCacheDel)
+						delete kvSubCacheDel[key];
 					cb();
 				}
 			}
@@ -220,9 +235,14 @@ exports.startSubBatch = function(callback){
 			if (bCommittingBatch)
 				return cb();
 			bCommittingBatch = true;
-			batch.write({sync: true}, function(){
-				kvCacheDel = {};
-				kvCachePut = {};
+			batch.write({sync: true}, function(err){
+				if (err)
+					throw Error("write batch failed " + err);
+
+				for (var key in kvCachePut)
+					delete kvCachePut[key];
+				for (var key in kvCacheDel)
+				delete kvCacheDel[key];
 
 				savepoint_index = 0;
 				bOngoingSubBatch = false;
@@ -296,7 +316,7 @@ var createReadStream = function(options){
 		if (options.keys)
 			arrResults.sort();
 		else
-			arrResults.sort((a,b)=>{a.key > b.key ? 1 : -1});
+			arrResults.sort((a,b)=>{a.key < b.key ? 1 : -1});
 
 		console.log("createReadStream results");
 		console.log(arrResults);
@@ -325,7 +345,10 @@ var createReadStream = function(options){
 	return this;
 }
 
-exports.createReadStream  = createReadStream;
+exports.createReadStream  = function(options){
+	return new createReadStream(options);
+}
+
 exports.createKeyStream = function(options){
 	options.keys = true;
 	options.values = false;
@@ -334,16 +357,17 @@ exports.createKeyStream = function(options){
 
 
 exports.get = function(key, cb){
+	console.log('kvCachePut');
 	if (kvCachePut[key]){
-		console.log(key + " found in kvSubCachePut")
-		return cb(null, kvSubCachePut[key]);
+		console.log(key + " found in kvCachePut")
+		return cb(kvCachePut[key]);
 	}
 	else if (kvCacheDel[key]){
-		console.log(key + " deleted in kvSubCachePut")
-		return cb({notFound: true, type: 'NotFoundError'});
+		console.log(key + " deleted in kvCacheDel")
+		return cb();
 	}
 	else {
-		console.log(key + " not found in kvSubCachePut")
+		console.log(key + " not found in kvCachePut")
 		return kvstore.get(key, cb);
 	}
 },

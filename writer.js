@@ -25,9 +25,9 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 	var objUnit = objJoint.unit;
 	console.log("\nsaving unit "+objUnit.unit);
 	var arrQueries = [];
-	if (objValidationState.conn && !objValidationState.batch)
-		throw Error("conn but not batch");
-	var bInLargerTx = (objValidationState.conn && objValidationState.batch);
+//	if (objValidationState.conn && !objValidationState.batch)
+//		throw Error("conn but not batch");
+	var bInLargerTx = !!objValidationState.subBatch;
 
 	function initConnection(handleConnection) {
 		if (bInLargerTx) {
@@ -635,12 +635,13 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 							profiler.stop('write-batch-write');
 							profiler.start();
 							var start_time = Date.now();
-
-							if (err)
-								subBatch.rollback(onCommit)
-							else
-								subBatch.release(onCommit)
-
+							if (!bInLargerTx){
+								if (err)
+									subBatch.rollback(onCommit);
+								else
+									subBatch.release(onCommit);
+							} else
+								onCommit();
 							function onCommit(){
 								var consumed_time = Date.now()-start_time;
 								profiler.add_result('write', consumed_time);
