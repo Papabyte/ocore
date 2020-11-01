@@ -17,6 +17,7 @@ var eventBus = require('./event_bus.js');
 var mutex = require('./mutex.js');
 var writer = require('./writer.js');
 var conf = require('./conf.js');
+var batcher = require('./batcher.js');
 
 var getFormula = require('./formula/common.js').getFormula;
 var hasCases = require('./formula/common.js').hasCases;
@@ -49,7 +50,7 @@ eventBus.on('new_aa_triggers', function () {
 
 function handleAATriggers() {
 	mutex.lock(['aa_triggers'], function (unlock) {
-		db.query(
+		batcher.query(
 			"SELECT aa_triggers.mci, aa_triggers.unit, address, definition \n\
 			FROM aa_triggers \n\
 			CROSS JOIN units USING(unit) \n\
@@ -76,24 +77,21 @@ function handleAATriggers() {
 }
 
 function handlePrimaryAATrigger(mci, unit, address, arrDefinition, arrPostedUnits, onDone) {
-	db.takeConnectionFromPool(function (conn) {
-		conn.query("BEGIN", function () {
-			var batch = kvstore.batch();
-			readMcUnit(conn, mci, function (objMcUnit) {
-				readUnit(conn, unit, function (objUnit) {
+	batcher.startSubBatch(function (subBatch) {
+			readMcUnit(subBatch.sql, mci, function (objMcUnit) {
+				readUnit(subBatch.sql, unit, function (objUnit) {
 					var arrResponses = [];
 					var trigger = getTrigger(objUnit, address);
 					trigger.initial_address = trigger.address;
 					trigger.initial_unit = trigger.unit;
-					handleTrigger(conn, batch, trigger, {}, {}, arrDefinition, address, mci, objMcUnit, false, arrResponses, function(){
-						conn.query("DELETE FROM aa_triggers WHERE mci=? AND unit=? AND address=?", [mci, unit, address], function(){
-							var batch_start_time = Date.now();
-							batch.write(function(err){
-								console.log("AA batch write took "+(Date.now()-batch_start_time)+'ms');
-								if (err)
-									throw Error("AA composer: batch write failed: "+err);
-								conn.query("COMMIT", function () {
-									conn.release();
+					handleTrigger(subBatch, trigger, {}, {}, arrDefinition, address, mci, objMcUnit, false, arrResponses, function(){
+						subBatch.sql.query("DELETE FROM aa_triggers WHERE mci=? AND unit=? AND address=?", [mci, unit, address], function(){
+							//var batch_start_time = Date.now();
+							//console.log("AA batch write took "+(Date.now()-batch_start_time)+'ms');
+						//	if (err)
+						//		throw Error("AA composer: batch write failed: "+err);
+							subBatch.kv.write(function(){
+								subBatch.release(function () {
 									// copy updatedStateVars to all responses
 									if (arrResponses.length > 1 && arrResponses[0].updatedStateVars)
 										for (var i = 1; i < arrResponses.length; i++)
@@ -113,7 +111,6 @@ function handlePrimaryAATrigger(mci, unit, address, arrDefinition, arrPostedUnit
 					});
 				});
 			});
-		});
 	});
 }
 
@@ -310,12 +307,11 @@ function getTrigger(objUnit, receiving_address) {
 }
 
 // the result is onDone(objResponseUnit, bBounced)
-function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, address, mci, objMcUnit, bSecondary, arrResponses, onDone) {
+function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, address, mci, objMcUnit, bSecondary, arrResponses, onDone) {
 	var trigger_opts;
 	if (arguments.length === 1) {
-		trigger_opts = conn;
-		conn = trigger_opts.conn;
-		batch = trigger_opts.batch;
+		trigger_opts = subBatch;
+		subBatch = trigger_opts.subBatch;
 		trigger = trigger_opts.trigger;
 		params = trigger_opts.params;
 		stateVars = trigger_opts.stateVars;
@@ -333,7 +329,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 			throw Error("assocBalances and bAir do not match");
 	}
 	else
-		trigger_opts = { conn, batch, trigger, params, stateVars, arrDefinition, address, mci, objMcUnit, bSecondary, arrResponses, onDone };
+		trigger_opts = { subBatch, trigger, params, stateVars, arrDefinition, address, mci, objMcUnit, bSecondary, arrResponses, onDone };
 	if (arrDefinition[0] !== 'autonomous agent')
 		throw Error('bad AA definition ' + arrDefinition);
 	if (!trigger.initial_address)
@@ -346,7 +342,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 	if (template.base_aa) { // parameterized AA
 		if (params && Object.keys(params).length > 0)
 			throw Error("unexpected params");
-		storage.readAADefinition(conn, template.base_aa, function (arrBaseDefinition) {
+		storage.readAADefinition(subBatch.sql, template.base_aa, function (arrBaseDefinition) {
 			if (!arrBaseDefinition)
 				throw Error("base AA not found: " + template.base_aa);
 			console.log("redirecting to base AA " + template.base_aa + " with params " + JSON.stringify(template.params));
@@ -394,7 +390,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 		}
 		objValidationState.assocBalances[address] = {};
 		var arrAssets = Object.keys(trigger.outputs);
-		conn.query(
+		subBatch.sql.query(
 			"SELECT asset, balance FROM aa_balances WHERE address=?",
 			[address],
 			function (rows) {
@@ -407,7 +403,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 						objValidationState.assocBalances[address][row.asset] = row.balance;
 						return;
 					}
-					conn.addQuery(
+					subBatch.sql.addQuery(
 						arrQueries,
 						"UPDATE aa_balances SET balance=balance+? WHERE address=? AND asset=? ",
 						[trigger.outputs[row.asset], address, row.asset]
@@ -420,17 +416,17 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 				if (arrNewAssets.length > 0) {
 					var arrValues = arrNewAssets.map(function (asset) {
 						objValidationState.assocBalances[address][asset] = trigger.outputs[asset];
-						return "(" + conn.escape(address) + ", " + conn.escape(asset) + ", " + trigger.outputs[asset] + ")"
+						return "(" + subBatch.sql.escape(address) + ", " + subBatch.sql.escape(asset) + ", " + trigger.outputs[asset] + ")"
 					});
-					conn.addQuery(arrQueries, "INSERT INTO aa_balances (address, asset, balance) VALUES "+arrValues.join(', '));
+					subBatch.sql.addQuery(arrQueries, "INSERT INTO aa_balances (address, asset, balance) VALUES "+arrValues.join(', '));
 				}
 				byte_balance = objValidationState.assocBalances[address].base;
 				if (trigger.outputs.base === undefined) // bug-compatible
 					byte_balance = undefined;
 				if (!bSecondary)
-					conn.addQuery(arrQueries, "SAVEPOINT initial_balances");
+				subBatch.sql.addQuery(arrQueries, "SAVEPOINT initial_balances");
 				async.series(arrQueries, function () {
-					conn.query("SELECT storage_size FROM aa_addresses WHERE address=?", [address], function (rows) {
+					subBatch.sql.query("SELECT storage_size FROM aa_addresses WHERE address=?", [address], function (rows) {
 						if (rows.length === 0)
 							throw Error("AA not found? " + address);
 						storage_size = rows[0].storage_size;
@@ -469,12 +465,12 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 		});
 		var arrQueries = [];
 		if (arrNewAssets.length > 0) {
-			var arrValues = arrNewAssets.map(function (asset) { return "(" + conn.escape(address) + ", " + conn.escape(asset) + ", 0)"; });
-			conn.addQuery(arrQueries, "INSERT "+conn.getIgnore()+" INTO aa_balances (address, asset, balance) VALUES "+arrValues.join(', '));
+			var arrValues = arrNewAssets.map(function (asset) { return "(" + subBatch.sql.escape(address) + ", " + subBatch.sql.escape(asset) + ", 0)"; });
+			subBatch.sql.addQuery(arrQueries, "INSERT "+subBatch.sql.getIgnore()+" INTO aa_balances (address, asset, balance) VALUES "+arrValues.join(', '));
 		}
 		for (var asset in assocDeltas) {
 			if (assocDeltas[asset]) {
-				conn.addQuery(arrQueries, "UPDATE aa_balances SET balance=balance+? WHERE address=? AND asset=?", [assocDeltas[asset], address, asset]);
+				subBatch.sql.addQuery(arrQueries, "UPDATE aa_balances SET balance=balance+? WHERE address=? AND asset=?", [assocDeltas[asset], address, asset]);
 				if (!objValidationState.assocBalances[address][asset])
 					objValidationState.assocBalances[address][asset] = 0;
 				objValidationState.assocBalances[address][asset] += assocDeltas[asset];
@@ -493,7 +489,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 		// evaluate getters before everything else as they can define a few functions
 		delete arrDefinition[1].getters;
 		var opts = {
-			conn: conn,
+			subBatch: subBatch,
 			formula: f,
 			trigger: trigger,
 			params: params,
@@ -523,7 +519,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 			var f = getFormula(name);
 			if (f !== null) {
 				var opts = {
-					conn: conn,
+					subBatch: subBatch,
 					formula: f,
 					trigger: trigger,
 					params: params,
@@ -565,7 +561,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 				return cb();
 			}
 			var opts = {
-				conn: conn,
+				subBatch: subBatch,
 				formula: f,
 				trigger: trigger,
 				params: params,
@@ -605,7 +601,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 						return cb2("case if is not a formula: " + acase.if);
 					var locals_tmp = _.clone(locals); // separate copy for each iteration of eachSeries
 					var opts = {
-						conn: conn,
+						subBatch: subBatch,
 						formula: f,
 						trigger: trigger,
 						params: params,
@@ -641,7 +637,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 					if (f === null)
 						return cb("case init is not a formula: " + thecase.init);
 					var opts = {
-						conn: conn,
+						subBatch: subBatch,
 						formula: f,
 						trigger: trigger,
 						params: params,
@@ -668,7 +664,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 				if (f === null)
 					return cb("if is not a formula: " + value.if);
 				var opts = {
-					conn: conn,
+					subBatch: subBatch,
 					formula: f,
 					trigger: trigger,
 					params: params,
@@ -699,7 +695,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 				if (f === null)
 					return cb("init is not a formula: " + value.init);
 				var opts = {
-					conn: conn,
+					subBatch: subBatch,
 					formula: f,
 					trigger: trigger,
 					params: params,
@@ -768,7 +764,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 		if (trigger_opts.bAir)
 			throw Error("pickParents shouldn't be called with bAir");
 		// first look for a chain of AAs stemming from the MC unit
-		conn.query(
+		subBatch.sql.query(
 			"SELECT units.unit \n\
 			FROM units CROSS JOIN unit_authors USING(unit) CROSS JOIN aa_addresses USING(address) \n\
 			WHERE latest_included_mc_index=? AND aa_addresses.mci<=? \n\
@@ -778,7 +774,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 				if (rows.length > 0)
 					return handleParents([rows[0].unit]);
 				// next, check if there is an AA stemming from a recent MCI
-				conn.query(
+				subBatch.sql.query(
 					"SELECT units.unit, latest_included_mc_index \n\
 					FROM units CROSS JOIN unit_authors USING(unit) CROSS JOIN aa_addresses USING(address) \n\
 					WHERE (main_chain_index>? OR main_chain_index IS NULL) AND aa_addresses.mci<=? \n\
@@ -942,11 +938,11 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 			function readStableOutputs(handleRows) {
 			//	console.log('--- readStableOutputs');
 				// byte outputs less than 60 bytes (which are net negative) are ignored to prevent dust attack: spamming the AA with very small outputs so that the AA spends all its money for fees when it tries to respond
-				conn.query(
+				subBatch.sql.query(
 					"SELECT unit, message_index, output_index, amount, output_id \n\
 					FROM outputs \n\
 					CROSS JOIN units USING(unit) \n\
-					WHERE address=? AND asset"+(asset ? "="+conn.escape(asset) : " IS NULL AND amount>=" + FULL_TRANSFER_INPUT_SIZE)+" AND is_spent=0 \n\
+					WHERE address=? AND asset"+(asset ? "="+subBatch.sql.escape(asset) : " IS NULL AND amount>=" + FULL_TRANSFER_INPUT_SIZE)+" AND is_spent=0 \n\
 						AND sequence='good' AND main_chain_index<=? \n\
 						AND output_id NOT IN("+(arrUsedOutputIds.length === 0 ? "-1" : arrUsedOutputIds.join(', '))+") \n\
 					ORDER BY main_chain_index, unit, output_index", // sort order must be deterministic
@@ -956,13 +952,13 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 
 			function readUnstableOutputsSentByAAs(handleRows) {
 			//	console.log('--- readUnstableOutputsSentByAAs');
-				conn.query(
+				subBatch.sql.query(
 					"SELECT outputs.unit, message_index, output_index, amount, output_id \n\
 					FROM outputs \n\
 					CROSS JOIN units USING(unit) \n\
 					CROSS JOIN unit_authors USING(unit) \n\
 					CROSS JOIN aa_addresses ON unit_authors.address=aa_addresses.address \n\
-					WHERE outputs.address=? AND asset"+(asset ? "="+conn.escape(asset) : " IS NULL AND amount>="+FULL_TRANSFER_INPUT_SIZE)+" AND is_spent=0 \n\
+					WHERE outputs.address=? AND asset"+(asset ? "="+subBatch.sql.escape(asset) : " IS NULL AND amount>="+FULL_TRANSFER_INPUT_SIZE)+" AND is_spent=0 \n\
 						AND sequence='good' AND (main_chain_index>? OR main_chain_index IS NULL) \n\
 						AND output_id NOT IN("+(arrUsedOutputIds.length === 0 ? "-1" : arrUsedOutputIds.join(', '))+") \n\
 					ORDER BY latest_included_mc_index, level, outputs.unit, output_index", // sort order must be deterministic
@@ -991,14 +987,14 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 				}
 				
 				if (objAsset.cap) {
-					conn.query("SELECT 1 FROM inputs WHERE type='issue' AND asset=?", [asset], function(rows){
+					subBatch.sql.query("SELECT 1 FROM inputs WHERE type='issue' AND asset=?", [asset], function(rows){
 						if (rows.length > 0) // already issued
 							return cb2('already issued');
 						addIssueInput(1);
 					});
 				}
 				else{
-					conn.query(
+					subBatch.sql.query(
 						"SELECT MAX(serial_number) AS max_serial_number FROM inputs WHERE type='issue' AND asset=? AND address=?",
 						[asset, address],
 						function(rows){
@@ -1083,7 +1079,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 					objBasePaymentMessage = message;
 					return cb(); // skip it for now, we can estimate the fees only after all other messages are in place
 				}
-				storage.loadAssetWithListOfAttestedAuthors(conn, asset, mci, [address], true, function (err, objAsset) {
+				storage.loadAssetWithListOfAttestedAuthors(subBatch.sql, asset, mci, [address], true, function (err, objAsset) {
 					if (err)
 						return cb(err);
 					assetInfos[asset] = objAsset;
@@ -1167,7 +1163,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 		if (!objStateUpdate || bBouncing)
 			return cb();
 		var opts = {
-			conn: conn,
+			subBatch: subBatch,
 			formula: objStateUpdate.formula,
 			trigger: trigger,
 			params: params,
@@ -1214,9 +1210,9 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 					continue;
 				var key = "st\n" + address + "\n" + var_name;
 				if (state.value === false) // false value signals that the var should be deleted
-					batch.del(key);
+					subBatch.kv.del(key);
 				else
-					batch.put(key, getTypeAndValue(state.value)); // Decimal converted to string, object to json
+					subBatch.kv.put(key, getTypeAndValue(state.value)); // Decimal converted to string, object to json
 			}
 		}
 	}
@@ -1271,7 +1267,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 			return cb("byte balance " + byte_balance + " would drop below new storage size " + new_storage_size);
 		if (delta_storage_size === 0)
 			return cb();
-		conn.query("UPDATE aa_addresses SET storage_size=? WHERE address=?", [new_storage_size, address], function () {
+		subBatch.sql.query("UPDATE aa_addresses SET storage_size=? WHERE address=?", [new_storage_size, address], function () {
 			cb();
 		});
 	}
@@ -1327,7 +1323,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 		arrResponses.push(objAAResponse);
 		if (trigger_opts.bAir)
 			return cb();
-		conn.query(
+		subBatch.sql.query(
 			"INSERT INTO aa_responses (mci, trigger_address, aa_address, trigger_unit, bounced, response_unit, response) \n\
 			VALUES (?, ?,?,?, ?,?,?)",
 			[mci, trigger.address, address, trigger.unit, bBouncing ? 1 : 0, response_unit, JSON.stringify(response)],
@@ -1387,7 +1383,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 	}
 
 	function handleSecondaryTriggers(objUnit, arrOutputAddresses) {
-		conn.query("SELECT address, definition FROM aa_addresses WHERE address IN(?) AND mci<=? ORDER BY address", [arrOutputAddresses, mci], function (rows) {
+		subBatch.sql.query("SELECT address, definition FROM aa_addresses WHERE address IN(?) AND mci<=? ORDER BY address", [arrOutputAddresses, mci], function (rows) {
 			if (rows.length > 0 && constants.bTestnet && mci < testnetAAsDefinedByAAsAreActiveImmediatelyUpgradeMci)
 				rows = rows.filter(function (row) {
 					var len = storage.getUnconfirmedAADefinitionsPostedByAAs([row.address]).length;
@@ -1448,8 +1444,8 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 		if (trigger_opts.bAir)
 			return bounce(err);
 		Object.keys(stateVars).forEach(function (address) { delete stateVars[address]; });
-		batch.clear();
-		conn.query("ROLLBACK TO SAVEPOINT initial_balances", function () {
+		subBatch.kv.clear();
+		subBatch.sql.query("ROLLBACK TO SAVEPOINT initial_balances", function () {
 			console.log('done revert: ' + err);
 			bounce(err);
 		});
@@ -1495,8 +1491,9 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 				if (objAAValidationState.sequence !== 'good')
 					throw Error("nonserial AA");
 				validation_unlock();
-				objAAValidationState.conn = conn;
-				objAAValidationState.batch = batch;
+			//	objAAValidationState.conn = conn;
+			//	objAAValidationState.batch = batch;
+				objAAValidationState.subBatch = subBatch;
 				objAAValidationState.initial_trigger_mci = mci;
 				writer.saveJoint(objJoint, objAAValidationState, null, function(err){
 					if (err)
@@ -1504,7 +1501,7 @@ function handleTrigger(conn, batch, trigger, params, stateVars, arrDefinition, a
 					cb();
 				});
 			}
-		}, conn);
+		}, subBatch);
 	}
 
 
@@ -1616,8 +1613,8 @@ function checkStorageSizes() {
 
 function checkBalances() {
 	mutex.lockOrSkip(['checkBalances'], function (unlock) {
-		db.takeConnectionFromPool(function (conn) { // block conection for the entire duration of the check
-			conn.query("SELECT 1 FROM aa_triggers", function (rows) {
+		batcher.startSubBatch(function (subBatch) { // block conection for the entire duration of the check
+			subBatch.sql.query("SELECT 1 FROM aa_triggers", function (rows) {
 				if (rows.length > 0) {
 					console.log("skipping checkBalances because there are unhandled triggers");
 					conn.release();
@@ -1655,14 +1652,14 @@ function checkBalances() {
 				async.eachSeries(
 					[sql_base, sql_assets_balances_to_outputs, sql_assets_outputs_to_balances],
 					function (sql, cb) {
-						conn.query(sql, function (rows) {
+						subBatch.sql.query(sql, function (rows) {
 							if (rows.length > 0)
 								throw Error("checkBalances failed: sql:\n" + sql + "\n\nrows:\n" + JSON.stringify(rows, null, '\t'));
 							cb();
 						});
 					},
 					function () {
-						conn.release();
+						subBatch.release();
 						unlock();
 					}
 				);

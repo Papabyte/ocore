@@ -9,7 +9,6 @@ var bCordova = (typeof window === 'object' && window.cordova);
 var sqlite3;
 var path;
 var cordovaSqlite;
-
 if (bCordova){
 	// will error before deviceready
 	//cordovaSqlite = window.cordova.require('cordova-sqlite-plugin.SQLite');
@@ -244,6 +243,7 @@ module.exports = function(db_name, MAX_CONNECTIONS, bReadOnly){
 		var bHasCallback = (typeof last_arg === 'function');
 		if (!bHasCallback) // no callback
 			last_arg = function(){};
+		console.log("======= query: "+arguments[0]);
 
 		var count_arguments_without_callback = bHasCallback ? (args.length-1) : args.length;
 		var new_args = [];

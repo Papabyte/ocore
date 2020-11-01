@@ -11,6 +11,7 @@ var objectHash = require("./object_hash.js");
 var mutex = require('./mutex.js');
 var conf = require('./conf.js');
 var breadcrumbs = require('./breadcrumbs.js');
+var batcher = require('./batcher.js');
 
 
 var assocKnownBadJoints = {};
@@ -26,7 +27,7 @@ function checkIfNewUnit(unit, callbacks) {
 	var error = assocKnownBadUnits[unit];
 	if (error)
 		return callbacks.ifKnownBad(error);
-	db.query("SELECT sequence, main_chain_index FROM units WHERE unit=?", [unit], function(rows){
+	batcher.query("SELECT sequence, main_chain_index FROM units WHERE unit=?", [unit], function(rows){
 		if (rows.length > 0){
 			var row = rows[0];
 			if (row.sequence === 'final-bad' && row.main_chain_index !== null && row.main_chain_index < storage.getMinRetrievableMci()) // already stripped
@@ -51,18 +52,18 @@ function checkIfNewJoint(objJoint, callbacks) {
 }
 
 
+
 function removeUnhandledJointAndDependencies(unit, onDone){
-	db.takeConnectionFromPool(function(conn){
+	batcher.startSubBatch(function(subBatch){
 		var arrQueries = [];
-		conn.addQuery(arrQueries, "BEGIN");
-		conn.addQuery(arrQueries, "DELETE FROM unhandled_joints WHERE unit=?", [unit]);
-		conn.addQuery(arrQueries, "DELETE FROM dependencies WHERE unit=?", [unit]);
-		conn.addQuery(arrQueries, "COMMIT");
+		subBatch.sql.addQuery(arrQueries, "DELETE FROM unhandled_joints WHERE unit=?", [unit]);
+		subBatch.sql.addQuery(arrQueries, "DELETE FROM dependencies WHERE unit=?", [unit]);
 		async.series(arrQueries, function(){
-			delete assocUnhandledUnits[unit];
-			conn.release();
-			if (onDone)
-				onDone();
+			subBatch.release(function(){
+				delete assocUnhandledUnits[unit];
+				if (onDone)
+					onDone();
+			});
 		});
 	});
 }
@@ -70,19 +71,23 @@ function removeUnhandledJointAndDependencies(unit, onDone){
 function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer, onDone){
 	var unit = objJoint.unit.unit;
 	assocUnhandledUnits[unit] = true;
-	db.takeConnectionFromPool(function(conn){
-		var sql = "INSERT "+conn.getIgnore()+" INTO dependencies (unit, depends_on_unit) VALUES " + arrMissingParentUnits.map(function(missing_unit){
-			return "("+conn.escape(unit)+", "+conn.escape(missing_unit)+")";
-		}).join(", ");
-		var arrQueries = [];
-		conn.addQuery(arrQueries, "BEGIN");
-		conn.addQuery(arrQueries, "INSERT "+conn.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
-		conn.addQuery(arrQueries, sql);
-		conn.addQuery(arrQueries, "COMMIT");
-		async.series(arrQueries, function(){
-			conn.release();
-			if (onDone)
-				onDone();
+	console.log("will save dependencies for " + unit + " " + JSON.stringify(arrMissingParentUnits));
+	mutex.lock(["dependencies"], function(unlock){
+		batcher.startSubBatch(function(subBatch){
+			var sql = "INSERT "+subBatch.sql.getIgnore()+" INTO dependencies (unit, depends_on_unit) VALUES " + arrMissingParentUnits.map(function(missing_unit){
+				return "("+subBatch.sql.escape(unit)+", "+subBatch.sql.escape(missing_unit)+")";
+			}).join(", ");
+			var arrQueries = [];
+			subBatch.sql.addQuery(arrQueries, "INSERT "+subBatch.sql.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
+			subBatch.sql.addQuery(arrQueries, sql);
+			async.series(arrQueries, function(){
+				subBatch.release(function(){
+					console.log('done writing dependencies for ' + unit)
+					if (onDone)
+						onDone();
+					unlock();
+				});
+			});
 		});
 	});
 }
@@ -90,13 +95,13 @@ function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer
 
 // handleDependentJoint called for each dependent unit
 function readDependentJointsThatAreReady(unit, handleDependentJoint){
-	//console.log("readDependentJointsThatAreReady "+unit);
+	console.log("readDependentJointsThatAreReady "+unit);
 	var t=Date.now();
 	var from = unit ? "FROM dependencies AS src_deps JOIN dependencies USING(unit)" : "FROM dependencies";
 	var where = unit ? "WHERE src_deps.depends_on_unit="+db.escape(unit) : "";
 	var lock = unit ? mutex.lock : mutex.lockOrSkip;
 	lock(["dependencies"], function(unlock){
-		db.query(
+		batcher.query(
 			"SELECT dependencies.unit, unhandled_joints.unit AS unit_for_json, \n\
 				SUM(CASE WHEN units.unit IS NULL THEN 1 ELSE 0 END) AS count_missing_parents \n\
 			"+from+" \n\
@@ -107,10 +112,10 @@ function readDependentJointsThatAreReady(unit, handleDependentJoint){
 			HAVING count_missing_parents=0 \n\
 			ORDER BY NULL", 
 			function(rows){
-				//console.log(rows.length+" joints are ready");
+				console.log(rows.length+" joints are ready");
 				//console.log("deps: "+(Date.now()-t));
 				rows.forEach(function(row) {
-					db.query("SELECT json, peer, "+db.getUnixTimestamp("creation_date")+" AS creation_ts FROM unhandled_joints WHERE unit=?", [row.unit_for_json], function(internal_rows){
+					batcher.query("SELECT json, peer, "+db.getUnixTimestamp("creation_date")+" AS creation_ts FROM unhandled_joints WHERE unit=?", [row.unit_for_json], function(internal_rows){
 						internal_rows.forEach(function(internal_row) {
 							handleDependentJoint(JSON.parse(internal_row.json), parseInt(internal_row.creation_ts), internal_row.peer);
 						});
@@ -125,7 +130,7 @@ function readDependentJointsThatAreReady(unit, handleDependentJoint){
 function findLostJoints(handleLostJoints){
 	//console.log("findLostJoints");
 	mutex.lockOrSkip(['findLostJoints'], function (unlock) {
-		db.query(
+		batcher.query(
 			"SELECT DISTINCT depends_on_unit \n\
 			FROM dependencies \n\
 			LEFT JOIN unhandled_joints ON depends_on_unit=unhandled_joints.unit \n\
@@ -223,7 +228,7 @@ function purgeUncoveredNonserialJoints(bByExistenceOfChildren, onDone){
 	var order_column = (conf.storage === 'mysql') ? 'creation_date' : 'rowid'; // this column must be indexed!
 	var byIndex = (bByExistenceOfChildren && conf.storage === 'sqlite') ? 'INDEXED BY bySequence' : '';
 	// the purged units can arrive again, no problem
-	db.query( // purge the bad ball if we've already received at least 7 witnesses after receiving the bad ball
+	batcher.query( // purge the bad ball if we've already received at least 7 witnesses after receiving the bad ball
 		"SELECT unit FROM units "+byIndex+" \n\
 		WHERE "+cond+" AND sequence IN('final-bad','temp-bad') AND content_hash IS NULL \n\
 			AND NOT EXISTS (SELECT * FROM dependencies WHERE depends_on_unit=units.unit) \n\
@@ -240,22 +245,20 @@ function purgeUncoveredNonserialJoints(bByExistenceOfChildren, onDone){
 		function(rows){
 			if (rows.length === 0)
 				return onDone();
-			db.takeConnectionFromPool(function (conn) {
+			batcher.startSubBatch(function (subBatch) {
 				async.eachSeries(
 					rows,
 					function (row, cb) {
 						breadcrumbs.add("--------------- archiving uncovered unit " + row.unit);
-						storage.readJoint(conn, row.unit, {
+						storage.readJoint(subBatch.sql, row.unit, {
 							ifNotFound: function () {
 								throw Error("nonserial unit not found?");
 							},
 							ifFound: function (objJoint) {
 								mutex.lock(["write"], function(unlock){
 									var arrQueries = [];
-									conn.addQuery(arrQueries, "BEGIN");
-									archiving.generateQueriesToArchiveJoint(conn, objJoint, 'uncovered', arrQueries, function(){
-										conn.addQuery(arrQueries, "COMMIT");
-										kvstore.del('j\n'+row.unit, function(){
+									archiving.generateQueriesToArchiveJoint(subBatch.sql, objJoint, 'uncovered', arrQueries, function(){
+										subBatch.kv.del('j\n'+row.unit, function(){
 											async.series(arrQueries, function(){
 												breadcrumbs.add("------- done archiving "+row.unit);
 												var parent_units = storage.assocUnstableUnits[row.unit].parent_units;
@@ -271,11 +274,11 @@ function purgeUncoveredNonserialJoints(bByExistenceOfChildren, onDone){
 						});
 					},
 					function () {
-						conn.query(
+						subBatch.sql.query(
 							"UPDATE units SET is_free=1 WHERE is_free=0 AND is_stable=0 \n\
 							AND (SELECT 1 FROM parenthoods WHERE parent_unit=unit LIMIT 1) IS NULL",
 							function () {
-								conn.release();
+								subBatch.release();
 								if (rows.length > 0)
 									return purgeUncoveredNonserialJoints(false, onDone); // to clean chains of bad units
 								onDone();
@@ -290,7 +293,7 @@ function purgeUncoveredNonserialJoints(bByExistenceOfChildren, onDone){
 
 // handleJoint is called for every joint younger than mci
 function readJointsSinceMci(mci, handleJoint, onDone){
-	db.query(
+	batcher.query(
 		"SELECT units.unit FROM units LEFT JOIN archived_joints USING(unit) \n\
 		WHERE (is_stable=0 AND main_chain_index>=? OR main_chain_index IS NULL OR is_free=1) AND archived_joints.unit IS NULL \n\
 		ORDER BY +level", 
@@ -299,7 +302,7 @@ function readJointsSinceMci(mci, handleJoint, onDone){
 			async.eachSeries(
 				rows, 
 				function(row, cb){
-					storage.readJoint(db, row.unit, {
+					storage.readJoint(batcher, row.unit, {
 						ifNotFound: function(){
 						//	throw Error("unit "+row.unit+" not found");
 							breadcrumbs.add("unit "+row.unit+" not found");

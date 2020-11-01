@@ -11,6 +11,7 @@ var archiving = require('./archiving.js');
 var eventBus = require('./event_bus.js');
 var profiler = require('./profiler.js');
 var ValidationUtils = require("./validation_utils.js");
+var batcher = require('./batcher.js');
 
 var testnetAssetsDefinedByAAsAreVisibleImmediatelyUpgradeMci = 1167000;
 
@@ -52,9 +53,8 @@ function readUnit(unit, cb) {
 }
 
 function readJointJsonFromStorage(conn, unit, cb) {
-	var kvstore = require('./kvstore.js');
 	if (!bCordova)
-		return kvstore.get('j\n' + unit, cb);
+		return batcher.get('j\n' + unit, cb);
 	conn.query("SELECT json FROM joints WHERE unit=?", [unit], function (rows) {
 		cb((rows.length === 0) ? null : rows[0].json);
 	});
@@ -915,8 +915,8 @@ function parseStateVar(type_and_value) {
 }
 
 function readAAStateVar(address, var_name, handleResult) {
-	var kvstore = require('./kvstore.js');
-	kvstore.get("st\n" + address + "\n" + var_name, function (type_and_value) {
+	batcher.get("st\n" + address + "\n" + var_name, function (type_and_value) {
+		console.log(var_name + " type_and_value " + type_and_value);
 		if (type_and_value === undefined)
 			return handleResult();
 		handleResult(parseStateVar(type_and_value));
@@ -1108,7 +1108,7 @@ function readLastStableMcIndex(conn, handleLastStableMcIndex){
 
 
 function readLastMainChainIndex(handleLastMcIndex){
-	db.query("SELECT MAX(main_chain_index) AS last_mc_index FROM units", function(rows){
+	batcher.query("SELECT MAX(main_chain_index) AS last_mc_index FROM units", function(rows){
 		var last_mc_index = rows[0].last_mc_index;
 		if (last_mc_index === null) // empty database
 			last_mc_index = 0;

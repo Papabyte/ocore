@@ -5,16 +5,17 @@ var conf = require('./conf.js');
 var constants = require('./constants.js');
 var storage = require('./storage.js');
 var ValidationUtils = require("./validation_utils.js");
+var batcher = require("./batcher.js");
 
 function readMyWitnesses(handleWitnesses, actionIfEmpty){
-	db.query("SELECT address FROM my_witnesses ORDER BY address", function(rows){
+	batcher.query("SELECT address FROM my_witnesses ORDER BY address", function(rows){
 		var arrWitnesses = rows.map(function(row){ return row.address; });
 		// reset witness list if old witnesses found
 		if (constants.alt === '2' && arrWitnesses.indexOf('5K7CSLTRPC5LFLOS3D34GBHG7RFD4TPO') >= 0
 			|| constants.versionWithoutTimestamp === '1.0' && arrWitnesses.indexOf('2FF7PSL7FYXVU5UIQHCVDTTPUOOG75GX') >= 0
 		){
 			console.log('deleting old witnesses');
-			db.query("DELETE FROM my_witnesses");
+			batcher.query("DELETE FROM my_witnesses");
 			arrWitnesses = [];
 		}
 		if (arrWitnesses.length === 0){

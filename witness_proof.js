@@ -7,7 +7,7 @@ var objectHash = require("./object_hash.js");
 var db = require('./db.js');
 var constants = require("./constants.js");
 var validation = require('./validation.js');
-
+var batcher = require('./batcher.js');
 
 
 function prepareWitnessProof(arrWitnesses, last_stable_mci, handleResult){
@@ -206,7 +206,7 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 
 				function handleAuthor(){
 					// FIX
-					validation.validateAuthorSignaturesWithoutReferences(author, objUnit, assocDefinitions[definition_chash], function(err){
+					validation.validateAuthorSignaturesWithoutReferences(batcher, author, objUnit, assocDefinitions[definition_chash], function(err){
 						if (err)
 							return cb3(err);
 						for (var i=0; i<objUnit.messages.length; i++){
@@ -223,7 +223,7 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 
 				if (assocDefinitions[definition_chash])
 					return handleAuthor();
-				storage.readDefinition(db, definition_chash, {
+				storage.readDefinition(batcher, definition_chash, {
 					ifFound: function(arrDefinition){
 						assocDefinitions[definition_chash] = arrDefinition;
 						handleAuthor();
@@ -255,7 +255,7 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 			async.eachSeries(
 				arrWitnesses, 
 				function(address, cb2){
-					storage.readDefinitionByAddress(db, address, null, {
+					storage.readDefinitionByAddress(batcher, address, null, {
 						ifFound: function(arrDefinition){
 							var definition_chash = objectHash.getChash160(arrDefinition);
 							assocDefinitions[definition_chash] = arrDefinition;
@@ -278,7 +278,7 @@ function processWitnessProof(arrUnstableMcJoints, arrWitnessChangeAndDefinitionJ
 					var objUnit = objJoint.unit;
 					if (!bFromCurrent)
 						return validateUnit(objUnit, true, cb2);
-					db.query("SELECT 1 FROM units WHERE unit=? AND is_stable=1", [objUnit.unit], function(rows){
+					batcher.query("SELECT 1 FROM units WHERE unit=? AND is_stable=1", [objUnit.unit], function(rows){
 						if (rows.length > 0) // already known and stable - skip it
 							return cb2();
 						validateUnit(objUnit, true, cb2);

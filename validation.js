@@ -20,6 +20,7 @@ var aa_validation = require("./aa_validation.js");
 var conf = require('./conf.js');
 var profiler = require('./profiler.js');
 var breadcrumbs = require('./breadcrumbs.js');
+var batcher = require('./batcher.js');
 
 var MAX_INT32 = Math.pow(2, 31) - 1;
 
@@ -48,7 +49,7 @@ function hasValidHashes(objJoint){
 	return true;
 }
 
-function validate(objJoint, callbacks, external_conn) {
+function validate(objJoint, callbacks, externalSubBatch) {
 	
 	var objUnit = objJoint.unit;
 	if (typeof objUnit !== "object" || objUnit === null)
@@ -191,31 +192,38 @@ function validate(objJoint, callbacks, external_conn) {
 	
 	mutex.lock(arrAuthorAddresses, function(unlock){
 		
-		var conn = null;
+		var subBatch = null;
 		var commit_fn = null;
 		var start_time = null;
 
 		async.series(
 			[
 				function(cb){
-					if (external_conn) {
-						conn = external_conn;
+					if (externalSubBatch) {
+						subBatch = externalSubBatch;
 						start_time = Date.now();
 						commit_fn = function (cb2) { cb2(); };
 						return cb();
 					}
-					db.takeConnectionFromPool(function(new_conn){
-						conn = new_conn;
+					console.log("start sub batch for unit " + objJoint.unit.unit)
+					batcher.startSubBatch(function(newsubBatch){
+						subBatch = newsubBatch;
 						start_time = Date.now();
 						commit_fn = function (cb2) {
-							conn.query(objValidationState.bAdvancedLastStableMci ? "COMMIT" : "ROLLBACK", function () { cb2(); });
+							console.log("commit_fn for unit " + objJoint.unit.unit)
+
+							if (objValidationState.bAdvancedLastStableMci)
+								subBatch.release(cb2);
+							else
+								subBatch.rollback(cb2);
+
 						};
-						conn.query("BEGIN", function(){cb();});
+						cb();
 					});
 				},
 				function(cb){
 					profiler.start();
-					checkDuplicate(conn, objUnit, cb);
+					checkDuplicate(subBatch, objUnit, cb);
 				},
 				function(cb){
 					profiler.stop('validation-checkDuplicate');
@@ -227,48 +235,48 @@ function validate(objJoint, callbacks, external_conn) {
 					profiler.start();
 					!objUnit.parent_units
 						? cb()
-						: validateHashTreeBall(conn, objJoint, cb);
+						: validateHashTreeBall(subBatch, objJoint, cb);
 				},
 				function(cb){
 					profiler.stop('validation-hash-tree-ball');
 					profiler.start();
 					!objUnit.parent_units
 						? cb()
-						: validateParentsExistAndOrdered(conn, objUnit, cb);
+						: validateParentsExistAndOrdered(subBatch, objUnit, cb);
 				},
 				function(cb){
 					profiler.stop('validation-parents-exist');
 					profiler.start();
 					!objUnit.parent_units
 						? cb()
-						: validateHashTreeParentsAndSkiplist(conn, objJoint, cb);
+						: validateHashTreeParentsAndSkiplist(subBatch, objJoint, cb);
 				},
 				function(cb){
 					profiler.stop('validation-hash-tree-parents');
 				//	profiler.start(); // conflicting with profiling in determineIfStableInLaterUnitsAndUpdateStableMcFlag
 					!objUnit.parent_units
 						? cb()
-						: validateParents(conn, objJoint, objValidationState, cb);
+						: validateParents(subBatch, objJoint, objValidationState, cb);
 				},
 				function(cb){
 				//	profiler.stop('validation-parents');
 					profiler.start();
 					!objJoint.skiplist_units
 						? cb()
-						: validateSkiplist(conn, objJoint.skiplist_units, cb);
+						: validateSkiplist(subBatch, objJoint.skiplist_units, cb);
 				},
 				function(cb){
 					profiler.stop('validation-skiplist');
-					validateWitnesses(conn, objUnit, objValidationState, cb);
+					validateWitnesses(subBatch, objUnit, objValidationState, cb);
 				},
 				function(cb){
 					profiler.start();
-					validateAuthors(conn, objUnit.authors, objUnit, objValidationState, cb);
+					validateAuthors(subBatch, objUnit.authors, objUnit, objValidationState, cb);
 				},
 				function(cb){
 					profiler.stop('validation-authors');
 					profiler.start();
-					objUnit.content_hash ? cb() : validateMessages(conn, objUnit.messages, objUnit, objValidationState, cb);
+					objUnit.content_hash ? cb() : validateMessages(subBatch, objUnit.messages, objUnit, objValidationState, cb);
 				}
 			], 
 			function(err){
@@ -281,8 +289,8 @@ function validate(objJoint, callbacks, external_conn) {
 						var consumed_time = Date.now()-start_time;
 						profiler.add_result('failed validation', consumed_time);
 						console.log(objUnit.unit+" validation "+JSON.stringify(err)+" took "+consumed_time+"ms");
-						if (!external_conn)
-							conn.release();
+						//if (!externalSubBatch)
+						//	subBatch.release();
 						unlock();
 						if (typeof err === "object"){
 							if (err.error_code === "unresolved_dependency")
@@ -307,8 +315,8 @@ function validate(objJoint, callbacks, external_conn) {
 						var consumed_time = Date.now()-start_time;
 						profiler.add_result('validation', consumed_time);
 						console.log(objUnit.unit+" validation ok took "+consumed_time+"ms");
-						if (!external_conn)
-							conn.release();
+					//	if (!externalsubBatch.sql)
+					//		conn.release();
 						profiler.stop('validation-commit');
 						if (objJoint.unsigned){
 							unlock();
@@ -330,9 +338,9 @@ function validate(objJoint, callbacks, external_conn) {
 //  ----------------    
 
 
-function checkDuplicate(conn, objUnit, cb){
+function checkDuplicate(subBatch, objUnit, cb){
 	var unit = objUnit.unit;
-	conn.query("SELECT sequence, main_chain_index FROM units WHERE unit=?", [unit], function (rows) {
+	subBatch.sql.query("SELECT sequence, main_chain_index FROM units WHERE unit=?", [unit], function (rows) {
 		if (rows.length === 0) 
 			return cb();
 		var row = rows[0];
@@ -342,7 +350,7 @@ function checkDuplicate(conn, objUnit, cb){
 	});
 }
 
-function validateHashTreeBall(conn, objJoint, callback){
+function validateHashTreeBall(subBatch, objJoint, callback){
 	if (!objJoint.ball)
 		return callback();
 	var objUnit = objJoint.unit;
@@ -356,7 +364,7 @@ function validateHashTreeBall(conn, objJoint, callback){
 //	});
 }
 
-function validateHashTreeParentsAndSkiplist(conn, objJoint, callback){
+function validateHashTreeParentsAndSkiplist(subBatch, objJoint, callback){
 	if (!objJoint.ball)
 		return callback();
 	var objUnit = objJoint.unit;
@@ -369,7 +377,7 @@ function validateHashTreeParentsAndSkiplist(conn, objJoint, callback){
 	}
 	
 	function readBallsByUnits(arrUnits, handleList){
-		conn.query("SELECT ball FROM balls WHERE unit IN(?) ORDER BY ball", [arrUnits], function(rows){
+		subBatch.sql.query("SELECT ball FROM balls WHERE unit IN(?) ORDER BY ball", [arrUnits], function(rows){
 			var arrBalls = rows.map(function(row){ return row.ball; });
 			if (arrBalls.length === arrUnits.length)
 				return handleList(arrBalls);
@@ -399,7 +407,7 @@ function validateHashTreeParentsAndSkiplist(conn, objJoint, callback){
 
 // we cannot verify that skiplist units lie on MC if they are unstable yet, 
 // but if they don't, we'll get unmatching ball hash when the current unit reaches stability
-function validateSkiplist(conn, arrSkiplistUnits, callback){
+function validateSkiplist(subBatch, arrSkiplistUnits, callback){
 	var prev = "";
 	async.eachSeries(
 		arrSkiplistUnits,
@@ -408,7 +416,7 @@ function validateSkiplist(conn, arrSkiplistUnits, callback){
 			//    return cb("skiplist unit doesn't start with 0");
 			if (skiplist_unit <= prev)
 				return cb(createJointError("skiplist units not ordered"));
-			conn.query("SELECT unit, is_stable, is_on_main_chain, main_chain_index FROM units WHERE unit=?", [skiplist_unit], function(rows){
+			subBatch.sql.query("SELECT unit, is_stable, is_on_main_chain, main_chain_index FROM units WHERE unit=?", [skiplist_unit], function(rows){
 				if (rows.length === 0)
 					return cb("skiplist unit "+skiplist_unit+" not found");
 				var objSkiplistUnitProps = rows[0];
@@ -429,7 +437,7 @@ function validateSkiplist(conn, arrSkiplistUnits, callback){
 	);
 }
 
-function validateParentsExistAndOrdered(conn, objUnit, callback){
+function validateParentsExistAndOrdered(subBatch, objUnit, callback){
 	var prev = "";
 	var arrMissingParentUnits = [];
 	if (objUnit.parent_units.length > constants.MAX_PARENTS_PER_UNIT) // anti-spam
@@ -442,7 +450,7 @@ function validateParentsExistAndOrdered(conn, objUnit, callback){
 			prev = parent_unit;
 			if (storage.assocUnstableUnits[parent_unit] || storage.assocStableUnits[parent_unit])
 				return cb();
-			storage.readStaticUnitProps(conn, parent_unit, function(objUnitProps){
+			storage.readStaticUnitProps(subBatch.sql, parent_unit, function(objUnitProps){
 				if (!objUnitProps)
 					arrMissingParentUnits.push(parent_unit);
 				cb();
@@ -452,7 +460,7 @@ function validateParentsExistAndOrdered(conn, objUnit, callback){
 			if (err)
 				return callback(err);
 			if (arrMissingParentUnits.length > 0){
-				conn.query("SELECT error FROM known_bad_joints WHERE unit IN(?)", [arrMissingParentUnits], function(rows){
+				subBatch.sql.query("SELECT error FROM known_bad_joints WHERE unit IN(?)", [arrMissingParentUnits], function(rows){
 					(rows.length > 0)
 						? callback("some of the unit's parents are known bad: "+rows[0].error)
 						: callback({error_code: "unresolved_dependency", arrMissingUnits: arrMissingParentUnits});
@@ -464,7 +472,7 @@ function validateParentsExistAndOrdered(conn, objUnit, callback){
 	);
 }
 
-function validateParents(conn, objJoint, objValidationState, callback){
+function validateParents(subBatch, objJoint, objValidationState, callback){
 	
 	// avoid merging the obvious nonserials
 	function checkNoSameAddressInDifferentParents(){
@@ -475,7 +483,7 @@ function validateParents(conn, objJoint, objValidationState, callback){
 		async.eachSeries(
 			objUnit.parent_units,
 			function(parent_unit, cb){
-				storage.readUnitAuthors(conn, parent_unit, function(arrAuthors){
+				storage.readUnitAuthors(subBatch.sql, parent_unit, function(arrAuthors){
 					arrAuthors.forEach(function(address){
 						if (assocAuthors[address])
 							found_address = address;
@@ -493,7 +501,7 @@ function validateParents(conn, objJoint, objValidationState, callback){
 	}
 	
 	function readMaxParentLastBallMci(handleResult){
-		storage.readMaxLastBallMci(conn, objUnit.parent_units, function(max_parent_last_ball_mci) {
+		storage.readMaxLastBallMci(subBatch.sql, objUnit.parent_units, function(max_parent_last_ball_mci) {
 			if (max_parent_last_ball_mci > objValidationState.last_ball_mci)
 				return callback("last ball mci must not retreat, parents: "+objUnit.parent_units.join(', '));
 			handleResult(max_parent_last_ball_mci);
@@ -515,7 +523,7 @@ function validateParents(conn, objJoint, objValidationState, callback){
 	async.eachSeries(
 		objUnit.parent_units, 
 		function(parent_unit, cb){
-			storage.readUnitProps(conn, parent_unit, function(objParentUnitProps){
+			storage.readUnitProps(subBatch.sql, parent_unit, function(objParentUnitProps){
 				if (objUnit.version !== constants.versionWithoutTimestamp && objUnit.timestamp < objParentUnitProps.timestamp)
 					return cb("timestamp decreased from parent " + parent_unit);
 				if (objParentUnitProps.latest_included_mc_index > objValidationState.max_parent_limci)
@@ -525,7 +533,7 @@ function validateParents(conn, objJoint, objValidationState, callback){
 				async.eachSeries(
 					arrPrevParentUnitProps, 
 					function(objPrevParentUnitProps, cb2){
-						graph.compareUnitsByProps(conn, objPrevParentUnitProps, objParentUnitProps, function(result){
+						graph.compareUnitsByProps(subBatch.sql, objPrevParentUnitProps, objParentUnitProps, function(result){
 							(result === null) ? cb2() : cb2("parent unit "+parent_unit+" is related to one of the other parent units");
 						});
 					},
@@ -541,7 +549,7 @@ function validateParents(conn, objJoint, objValidationState, callback){
 		function(err){
 			if (err)
 				return callback(err);
-			conn.query(
+				subBatch.sql.query(
 				"SELECT is_stable, is_on_main_chain, main_chain_index, ball, timestamp, (SELECT MAX(main_chain_index) FROM units) AS max_known_mci \n\
 				FROM units LEFT JOIN balls USING(unit) WHERE unit=?", 
 				[last_ball_unit], 
@@ -584,7 +592,7 @@ function validateParents(conn, objJoint, objValidationState, callback){
 								return checkNoSameAddressInDifferentParents();
 						}
 						// Last ball is not stable yet in our view. Check if it is stable in view of the parents
-						main_chain.determineIfStableInLaterUnitsAndUpdateStableMcFlag(conn, last_ball_unit, objUnit.parent_units, objLastBallUnitProps.is_stable, function(bStable, bAdvancedLastStableMci){
+						main_chain.determineIfStableInLaterUnitsAndUpdateStableMcFlag(subBatch, last_ball_unit, objUnit.parent_units, objLastBallUnitProps.is_stable, function(bStable, bAdvancedLastStableMci){
 							/*if (!bStable && objLastBallUnitProps.is_stable === 1){
 								var eventBus = require('./event_bus.js');
 								eventBus.emit('nonfatal_error', "last ball is stable, but not stable in parents, unit "+objUnit.unit, new Error());
@@ -594,7 +602,7 @@ function validateParents(conn, objJoint, objValidationState, callback){
 								return callback(objUnit.unit+": last ball unit "+last_ball_unit+" is not stable in view of your parents "+objUnit.parent_units);
 							if (!bAdvancedLastStableMci)
 								return checkNoSameAddressInDifferentParents();
-							conn.query("SELECT ball FROM balls WHERE unit=?", [last_ball_unit], function(ball_rows){
+							subBatch.sql.query("SELECT ball FROM balls WHERE unit=?", [last_ball_unit], function(ball_rows){
 								if (ball_rows.length === 0)
 									throw Error("last ball unit "+last_ball_unit+" just became stable but ball not found");
 								if (ball_rows[0].ball !== last_ball)
@@ -612,12 +620,12 @@ function validateParents(conn, objJoint, objValidationState, callback){
 	);
 }
 
-function validateWitnesses(conn, objUnit, objValidationState, callback){
+function validateWitnesses(subBatch, objUnit, objValidationState, callback){
 
 	function validateWitnessListMutations(arrWitnesses){
 		if (!objUnit.parent_units) // genesis
 			return callback();
-		storage.determineIfHasWitnessListMutationsAlongMc(conn, objUnit, last_ball_unit, arrWitnesses, function(err){
+		storage.determineIfHasWitnessListMutationsAlongMc(subBatch.sql, objUnit, last_ball_unit, arrWitnesses, function(err){
 			if (err && objValidationState.last_ball_mci >= 512000) // do not enforce before the || bug was fixed
 				return callback(err);
 			checkNoReferencesInWitnessAddressDefinitions(arrWitnesses);
@@ -627,7 +635,7 @@ function validateWitnesses(conn, objUnit, objValidationState, callback){
 	function checkNoReferencesInWitnessAddressDefinitions(arrWitnesses){
 		profiler.start();
 		var cross = (conf.storage === 'sqlite') ? 'CROSS' : ''; // correct the query planner
-		conn.query(
+		subBatch.sql.query(
 			"SELECT 1 \n\
 			FROM address_definition_changes \n\
 			JOIN definitions USING(definition_chash) \n\
@@ -654,7 +662,7 @@ function validateWitnesses(conn, objUnit, objValidationState, callback){
 	}
 
 	function checkWitnessedLevelDidNotRetreat(arrWitnesses){
-		storage.determineWitnessedLevelAndBestParent(conn, objUnit.parent_units, arrWitnesses, function(witnessed_level, best_parent_unit){
+		storage.determineWitnessedLevelAndBestParent(subBatch.sql, objUnit.parent_units, arrWitnesses, function(witnessed_level, best_parent_unit){
 			if (!best_parent_unit)
 				return callback("no best parent");
 			objValidationState.witnessed_level = witnessed_level;
@@ -665,7 +673,7 @@ function validateWitnesses(conn, objUnit, objValidationState, callback){
 				throw Error('no max_parent_wl');
 			if (objValidationState.last_ball_mci >= constants.witnessedLevelMustNotRetreatFromAllParentsUpgradeMci)
 				return (witnessed_level >= objValidationState.max_parent_wl) ? callback() : callback("witnessed level retreats from parent's "+objValidationState.max_parent_wl+" to "+witnessed_level);
-			storage.readStaticUnitProps(conn, best_parent_unit, function(props){
+			storage.readStaticUnitProps(subBatch.sql, best_parent_unit, function(props){
 				(witnessed_level >= props.witnessed_level) 
 					? callback() 
 					: callback("witnessed level retreats from "+props.witnessed_level+" to "+witnessed_level);
@@ -676,7 +684,7 @@ function validateWitnesses(conn, objUnit, objValidationState, callback){
 	var last_ball_unit = objUnit.last_ball_unit;
 	if (typeof objUnit.witness_list_unit === "string"){
 		profiler.start();
-		storage.readWitnessList(conn, objUnit.witness_list_unit, function(arrWitnesses){
+		storage.readWitnessList(subBatch.sql, objUnit.witness_list_unit, function(arrWitnesses){
 			if (arrWitnesses.length === 0){
 				profiler.stop('validation-witnesses-read-list');
 				return callback("referenced witness list unit "+objUnit.witness_list_unit+" has no witnesses");
@@ -685,7 +693,7 @@ function validateWitnesses(conn, objUnit, objValidationState, callback){
 				profiler.stop('validation-witnesses-read-list');
 				return validateWitnessListMutations(arrWitnesses);
 			}
-			conn.query("SELECT sequence, is_stable, main_chain_index FROM units WHERE unit=?", [objUnit.witness_list_unit], function(unit_rows){
+			subBatch.sql.query("SELECT sequence, is_stable, main_chain_index FROM units WHERE unit=?", [objUnit.witness_list_unit], function(unit_rows){
 				profiler.stop('validation-witnesses-read-list');
 				if (unit_rows.length === 0)
 					return callback("witness list unit "+objUnit.witness_list_unit+" not found");
@@ -720,7 +728,7 @@ function validateWitnesses(conn, objUnit, objValidationState, callback){
 		}
 		profiler.start();
 		// check that all witnesses are already known and their units are good and stable
-		conn.query(
+		subBatch.sql.query(
 			// address=definition_chash is true in the first appearence of the address
 			// (not just in first appearence: it can return to its initial definition_chash sometime later)
 			"SELECT COUNT(DISTINCT address) AS count_stable_good_witnesses \n\
@@ -767,7 +775,7 @@ function validateHeadersCommissionRecipients(objUnit, cb){
 	cb();
 }
 
-function validateAuthors(conn, arrAuthors, objUnit, objValidationState, callback) {
+function validateAuthors(subBatch, arrAuthors, objUnit, objValidationState, callback) {
 	if (objValidationState.bAA && arrAuthors.length !== 1)
 		throw Error("AA unit with multiple authors");
 	if (arrAuthors.length > constants.MAX_AUTHORS_PER_UNIT) // this is anti-spam. Otherwise an attacker would send nonserial balls signed by zillions of authors.
@@ -784,11 +792,11 @@ function validateAuthors(conn, arrAuthors, objUnit, objValidationState, callback
 	objValidationState.unit_hash_to_sign = objectHash.getUnitHashToSign(objUnit);
 	
 	async.eachSeries(arrAuthors, function(objAuthor, cb){
-		validateAuthor(conn, objAuthor, objUnit, objValidationState, cb);
+		validateAuthor(subBatch, objAuthor, objUnit, objValidationState, cb);
 	}, callback);
 }
 
-function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
+function validateAuthor(subBatch, objAuthor, objUnit, objValidationState, callback){
 	if (!isStringOfLength(objAuthor.address, 32))
 		return callback("wrong address length");
 	if (objValidationState.bAA && hasFieldsExcept(objAuthor, ["address"]))
@@ -810,7 +818,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 	var bInitialDefinition = false;
 
 	if (objValidationState.bAA) {
-		storage.readAADefinition(conn, objAuthor.address, function (arrDefinition) {
+		storage.readAADefinition(subBatch.sql, objAuthor.address, function (arrDefinition) {
 			if (!arrDefinition)
 				throw Error("AA definition not found");
 			checkSerialAddressUse();
@@ -833,9 +841,9 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 			return callback();
 		}
 		// we check signatures using the latest address definition before last ball
-		storage.readDefinitionByAddress(conn, objAuthor.address, objValidationState.last_ball_mci, {
+		storage.readDefinitionByAddress(subBatch.sql, objAuthor.address, objValidationState.last_ball_mci, {
 			ifDefinitionNotFound: function(definition_chash){
-				storage.readAADefinition(conn, objAuthor.address, function (arrAADefinition) {
+				storage.readAADefinition(subBatch.sql, objAuthor.address, function (arrAADefinition) {
 					if (arrAADefinition)
 						return callback(createTransientError("will not validate unit signed by AA"));
 					findUnstableInitialDefinition(definition_chash, function (arrDefinition) {
@@ -857,7 +865,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 	function findUnstableInitialDefinition(definition_chash, handleUnstableInitialDefinition) {
 		if (objValidationState.last_ball_mci < constants.unstableInitialDefinitionUpgradeMci || definition_chash !== objAuthor.address)
 			return handleUnstableInitialDefinition(null);
-		conn.query("SELECT definition, main_chain_index, unit \n\
+		subBatch.sql.query("SELECT definition, main_chain_index, unit \n\
 			FROM definitions \n\
 			CROSS JOIN unit_authors USING(definition_chash) \n\
 			CROSS JOIN units USING(unit) \n\
@@ -871,7 +879,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 				async.eachSeries(
 					rows,
 					function (row, cb) {
-						graph.determineIfIncludedOrEqual(conn, row.unit, objUnit.parent_units, function (bIncluded) {
+						graph.determineIfIncludedOrEqual(subBatch.sql, row.unit, objUnit.parent_units, function (bIncluded) {
 							console.log("unstable definition of " + definition_chash + " found in " + row.unit + ", included? " + bIncluded);
 							bIncluded ? cb(JSON.parse(row.definition)) : cb();
 						});
@@ -886,7 +894,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 	
 	function validateAuthentifiers(arrAddressDefinition){
 		Definition.validateAuthentifiers(
-			conn, objAuthor.address, null, arrAddressDefinition, objUnit, objValidationState, objAuthor.authentifiers, 
+		subBatch.sql, objAuthor.address, null, arrAddressDefinition, objUnit, objValidationState, objAuthor.authentifiers, 
 			function(err, res){
 				if (err) // error in address definition
 					return callback(err);
@@ -901,7 +909,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 	function findConflictingUnits(handleConflictingUnits){
 	//	var cross = (objValidationState.max_known_mci - objValidationState.max_parent_limci < 1000) ? 'CROSS' : '';
 		var indexMySQL = conf.storage == "mysql" ? "USE INDEX(unitAuthorsIndexByAddressMci)" : "";
-		conn.query( // _left_ join forces use of indexes in units
+		subBatch.sql.query( // _left_ join forces use of indexes in units
 		/*	"SELECT unit, is_stable \n\
 			FROM units \n\
 			"+cross+" JOIN unit_authors USING(unit) \n\
@@ -926,7 +934,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 				async.eachSeries(
 					rows,
 					function(row, cb){
-						graph.determineIfIncludedOrEqual(conn, row.unit, objUnit.parent_units, function(bIncluded){
+						graph.determineIfIncludedOrEqual(subBatch.sql, row.unit, objUnit.parent_units, function(bIncluded){
 							if (!bIncluded)
 								arrConflictingUnitProps.push(row);
 							else if (bAllSerial)
@@ -970,7 +978,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 				return next();
 			if (arrUnstableConflictingUnits.length === 0)
 				return next();
-			conn.query("SELECT unit FROM units WHERE unit IN(?) AND +sequence='good'",[arrUnstableConflictingUnits],function(rows){
+				subBatch.sql.query("SELECT unit FROM units WHERE unit IN(?) AND +sequence='good'",[arrUnstableConflictingUnits],function(rows){
 				if (rows.length > 0)
 					objValidationState.arrUnitsGettingBadSequence = (objValidationState.arrUnitsGettingBadSequence || []).concat(rows.map(function(row){return row.unit}));
 				// we don't modify the db during validation, schedule the update for the write
@@ -986,7 +994,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 	function checkNoPendingChangeOfDefinitionChash(){
 		var next = checkNoPendingDefinition;
 		//var filter = bNonserial ? "AND sequence='good'" : "";
-		conn.query(
+		subBatch.sql.query(
 			"SELECT unit FROM address_definition_changes JOIN units USING(unit) \n\
 			WHERE address=? AND (is_stable=0 OR main_chain_index>? OR main_chain_index IS NULL)", 
 			[objAuthor.address, objValidationState.last_ball_mci], 
@@ -999,7 +1007,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 				async.eachSeries(
 					rows,
 					function(row, cb){
-						graph.determineIfIncludedOrEqual(conn, row.unit, objUnit.parent_units, function(bIncluded){
+						graph.determineIfIncludedOrEqual(subBatch.sql, row.unit, objUnit.parent_units, function(bIncluded){
 							if (bIncluded)
 								console.log("checkNoPendingChangeOfDefinitionChash: unit "+row.unit+" is included");
 							bIncluded ? cb("found") : cb();
@@ -1024,7 +1032,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 			return next();
 		//var filter = bNonserial ? "AND sequence='good'" : "";
 	//	var cross = (objValidationState.max_known_mci - objValidationState.last_ball_mci < 1000) ? 'CROSS' : '';
-		conn.query( // _left_ join forces use of indexes in units
+		subBatch.sql.query( // _left_ join forces use of indexes in units
 		//	"SELECT unit FROM units "+cross+" JOIN unit_authors USING(unit) \n\
 		//	WHERE address=? AND definition_chash IS NOT NULL AND ( /* is_stable=0 OR */ main_chain_index>? OR main_chain_index IS NULL)", 
 		//	[objAuthor.address, objValidationState.last_ball_mci], 
@@ -1041,7 +1049,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 				async.eachSeries(
 					rows,
 					function(row, cb){
-						graph.determineIfIncludedOrEqual(conn, row.unit, objUnit.parent_units, function(bIncluded){
+						graph.determineIfIncludedOrEqual(subBatch.sql, row.unit, objUnit.parent_units, function(bIncluded){
 							if (bIncluded)
 								console.log("checkNoPendingDefinition: unit "+row.unit+" is included");
 							bIncluded ? cb("found") : cb();
@@ -1105,7 +1113,7 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 			return callback();
 		// the rest assumes that the definition is explicitly defined
 		var arrAddressDefinition = objAuthor.definition;
-		storage.readDefinitionByAddress(conn, objAuthor.address, objValidationState.last_ball_mci, {
+		storage.readDefinitionByAddress(subBatch.sql, objAuthor.address, objValidationState.last_ball_mci, {
 			ifDefinitionNotFound: function(definition_chash){ // first use of the definition_chash (in particular, of the address, when definition_chash=address)
 				if (objectHash.getChash160(arrAddressDefinition) !== definition_chash)
 					return callback("wrong definition: "+objectHash.getChash160(arrAddressDefinition) +"!=="+ definition_chash);
@@ -1129,12 +1137,12 @@ function validateAuthor(conn, objAuthor, objUnit, objValidationState, callback){
 	
 }
 
-function validateMessages(conn, arrMessages, objUnit, objValidationState, callback){
+function validateMessages(subBatch, arrMessages, objUnit, objValidationState, callback){
 	console.log("validateMessages "+objUnit.unit);
 	async.forEachOfSeries(
 		arrMessages, 
 		function(objMessage, message_index, cb){
-			validateMessage(conn, objMessage, message_index, objUnit, objValidationState, cb); 
+			validateMessage(subBatch, objMessage, message_index, objUnit, objValidationState, cb); 
 		}, 
 		function(err){
 			if (err)
@@ -1146,7 +1154,7 @@ function validateMessages(conn, arrMessages, objUnit, objValidationState, callba
 	);
 }
 
-function validateMessage(conn, objMessage, message_index, objUnit, objValidationState, callback) {
+function validateMessage(subBatch, objMessage, message_index, objUnit, objValidationState, callback) {
 	if (typeof objMessage.app !== "string")
 		return callback("no app");
 	if (!isStringOfLength(objMessage.payload_hash, constants.HASH_LENGTH))
@@ -1239,7 +1247,7 @@ function validateMessage(conn, objMessage, message_index, objUnit, objValidation
 	
 	function validatePayload(cb){
 		if (objMessage.payload_location === "inline"){
-			validateInlinePayload(conn, objMessage, message_index, objUnit, objValidationState, cb);
+			validateInlinePayload(subBatch, objMessage, message_index, objUnit, objValidationState, cb);
 		}
 		else{
 			if (!isValidBase64(objMessage.payload_hash, constants.HASH_LENGTH))
@@ -1252,11 +1260,11 @@ function validateMessage(conn, objMessage, message_index, objUnit, objValidation
 		if (!("spend_proofs" in objMessage))
 			return cb();
 		var arrEqs = objMessage.spend_proofs.map(function(objSpendProof){
-			return "spend_proof="+conn.escape(objSpendProof.spend_proof)+
-				" AND address="+conn.escape(objSpendProof.address ? objSpendProof.address : objUnit.authors[0].address);
+			return "spend_proof="+subBatch.sql.escape(objSpendProof.spend_proof)+
+				" AND address="+subBatch.sql.escape(objSpendProof.address ? objSpendProof.address : objUnit.authors[0].address);
 		});
 		var doubleSpendIndexMySQL = conf.storage == "mysql" ? "USE INDEX(bySpendProof)" : "";
-		checkForDoublespends(conn, "spend proof", 
+		checkForDoublespends(subBatch, "spend proof", 
 			"SELECT address, unit, main_chain_index, sequence FROM spend_proofs "+ doubleSpendIndexMySQL+" JOIN units USING(unit) WHERE unit != ? AND ("+arrEqs.join(" OR ")+")",
 			[objUnit.unit], 
 			objUnit, objValidationState, function(cb2){ cb2(); }, cb);
@@ -1266,8 +1274,8 @@ function validateMessage(conn, objMessage, message_index, objUnit, objValidation
 }
 
 
-function checkForDoublespends(conn, type, sql, arrSqlArgs, objUnit, objValidationState, onAcceptedDoublespends, cb){
-	conn.query(
+function checkForDoublespends(subBatch, type, sql, arrSqlArgs, objUnit, objValidationState, onAcceptedDoublespends, cb){
+	subBatch.sql.query(
 		sql, 
 		arrSqlArgs,
 		function(rows){
@@ -1281,7 +1289,7 @@ function checkForDoublespends(conn, type, sql, arrSqlArgs, objUnit, objValidatio
 						throw Error("conflicting "+type+" spent from another address?");
 					if (conf.bLight) // we can't use graph in light wallet, the private payment can be resent and revalidated when stable
 						return cb2(objUnit.unit+": conflicting "+type);
-					graph.determineIfIncludedOrEqual(conn, objConflictingRecord.unit, objUnit.parent_units, function(bIncluded){
+					graph.determineIfIncludedOrEqual(subBatch.sql, objConflictingRecord.unit, objUnit.parent_units, function(bIncluded){
 						if (bIncluded){
 							var error = objUnit.unit+": conflicting "+type+" in inner unit "+objConflictingRecord.unit;
 
@@ -1316,7 +1324,7 @@ function checkForDoublespends(conn, type, sql, arrSqlArgs, objUnit, objValidatio
 	);
 }
 
-function validateInlinePayload(conn, objMessage, message_index, objUnit, objValidationState, callback){
+function validateInlinePayload(subBatch, objMessage, message_index, objUnit, objValidationState, callback){
 	var payload = objMessage.payload;
 	if (typeof payload === "undefined")
 		return callback("no inline payload");
@@ -1377,7 +1385,7 @@ function validateInlinePayload(conn, objMessage, message_index, objUnit, objVali
 			if (constants.bTestnet && ['BD7RTYgniYtyCX0t/a/mmAAZEiK/ZhTvInCMCPG5B1k=', 'EHEkkpiLVTkBHkn8NhzZG/o4IphnrmhRGxp4uQdEkco=', 'bx8VlbNQm2WA2ruIhx04zMrlpQq3EChK6o3k5OXJ130=', '08t8w/xuHcsKlMpPWajzzadmMGv+S4AoeV/QL1F3kBM='].indexOf(objUnit.unit) >= 0)
 				return callback();
 			var readGetterProps = function (aa_address, func_name, cb) {
-				storage.readAAGetterProps(conn, aa_address, func_name, cb);
+				storage.readAAGetterProps(subBatch.sql, aa_address, func_name, cb);
 			};
 			aa_validation.validateAADefinition(payload.definition, readGetterProps, objValidationState.last_ball_mci, function (err) {
 				if (err)
@@ -1386,7 +1394,7 @@ function validateInlinePayload(conn, objMessage, message_index, objUnit, objVali
 				if (template.messages)
 					return callback(); // regular AA
 				// else parameterized AA
-				storage.readAADefinition(conn, template.base_aa, function (arrBaseDefinition) {
+				storage.readAADefinition(subBatch.sql, template.base_aa, function (arrBaseDefinition) {
 					if (!arrBaseDefinition)
 						return callback("base AA not found");
 					if (!arrBaseDefinition[1].messages)
@@ -1429,7 +1437,7 @@ function validateInlinePayload(conn, objMessage, message_index, objUnit, objVali
 				return callback("choice must be string");
 			if (hasFieldsExcept(payload, ["unit", "choice"]))
 				return callback("unknown fields in "+objMessage.app);
-			conn.query(
+			subBatch.sql.query(
 				"SELECT main_chain_index, sequence FROM polls JOIN poll_choices USING(unit) JOIN units USING(unit) WHERE unit=? AND choice=?", 
 				[payload.unit, payload.choice],
 				function(poll_unit_rows){
@@ -1511,7 +1519,7 @@ function validateInlinePayload(conn, objMessage, message_index, objUnit, objVali
 			if (objValidationState.bHasAssetDefinition)
 				return callback("can be only one asset definition");
 			objValidationState.bHasAssetDefinition = true;
-			validateAssetDefinition(conn, payload, objUnit, objValidationState, callback);
+			validateAssetDefinition(subBatch.sql, payload, objUnit, objValidationState, callback);
 			break;
 
 		case "asset_attestors":
@@ -1520,11 +1528,11 @@ function validateInlinePayload(conn, objMessage, message_index, objUnit, objVali
 			if (objValidationState.assocHasAssetAttestors[payload.asset])
 				return callback("can be only one asset attestor list update per asset");
 			objValidationState.assocHasAssetAttestors[payload.asset] = true;
-			validateAttestorListUpdate(conn, payload, objUnit, objValidationState, callback);
+			validateAttestorListUpdate(subBatch.sql, payload, objUnit, objValidationState, callback);
 			break;
 
 		case "payment":
-			validatePayment(conn, payload, message_index, objUnit, objValidationState, callback);
+			validatePayment(subBatch, payload, message_index, objUnit, objValidationState, callback);
 			break;
 
 		default:
@@ -1533,7 +1541,7 @@ function validateInlinePayload(conn, objMessage, message_index, objUnit, objVali
 }
 
 // used for both public and private payments
-function validatePayment(conn, payload, message_index, objUnit, objValidationState, callback){
+function validatePayment(subBatch, payload, message_index, objUnit, objValidationState, callback){
 
 	if (!isNonemptyArray(payload.inputs))
 		return callback("no inputs");
@@ -1546,7 +1554,7 @@ function validatePayment(conn, payload, message_index, objUnit, objValidationSta
 		if (objValidationState.bHasBasePayment)
 			return callback("can have only one base payment");
 		objValidationState.bHasBasePayment = true;
-		return validatePaymentInputsAndOutputs(conn, payload, null, message_index, objUnit, objValidationState, callback);
+		return validatePaymentInputsAndOutputs(subBatch, payload, null, message_index, objUnit, objValidationState, callback);
 	}
 	
 	// asset
@@ -1555,7 +1563,7 @@ function validatePayment(conn, payload, message_index, objUnit, objValidationSta
 	
 	var arrAuthorAddresses = objUnit.authors.map(function(author) { return author.address; } );
 	// note that light clients cannot check attestations
-	storage.loadAssetWithListOfAttestedAuthors(conn, payload.asset, objValidationState.last_ball_mci, arrAuthorAddresses, objValidationState.bAA, function(err, objAsset){
+	storage.loadAssetWithListOfAttestedAuthors(subBatch.sql, payload.asset, objValidationState.last_ball_mci, arrAuthorAddresses, objValidationState.bAA, function(err, objAsset){
 		if (err)
 			return callback(err);
 		if (hasFieldsExcept(payload, ["inputs", "outputs", "asset", "denomination"]))
@@ -1594,12 +1602,12 @@ function validatePayment(conn, payload, message_index, objUnit, objValidationSta
 			if (bIssue && objAsset.arrAttestedAddresses.indexOf(issuer_address) === -1)
 				return callback("issuer is not attested");
 		}
-		validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index, objUnit, objValidationState, callback);
+		validatePaymentInputsAndOutputs(subBatch, payload, objAsset, message_index, objUnit, objValidationState, callback);
 	});
 }
 
 // divisible assets (including base asset)
-function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index, objUnit, objValidationState, callback){
+function validatePaymentInputsAndOutputs(subBatch, payload, objAsset, message_index, objUnit, objValidationState, callback){
 	
 //	if (objAsset)
 //		profiler2.start();
@@ -1677,7 +1685,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 	function validateIndivisibleIssue(input, cb){
 	//	if (objAsset)
 	//		profiler2.start();
-		conn.query(
+		subBatch.sql.query(
 			"SELECT count_coins FROM asset_denominations WHERE asset=? AND denomination=?", 
 			[payload.asset, denomination], 
 			function(rows){
@@ -1726,7 +1734,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 			function checkInputDoubleSpend(cb2){
 			//	if (objAsset)
 			//		profiler2.start();
-				doubleSpendWhere += " AND unit != " + conn.escape(objUnit.unit);
+				doubleSpendWhere += " AND unit != " + subBatch.sql.escape(objUnit.unit);
 				if (objAsset){
 					doubleSpendWhere += " AND asset=?";
 					doubleSpendVars.push(payload.asset);
@@ -1735,7 +1743,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 					doubleSpendWhere += " AND asset IS NULL";
 				var doubleSpendQuery = "SELECT "+doubleSpendFields+" FROM inputs " + doubleSpendIndexMySQL + " JOIN units USING(unit) WHERE "+doubleSpendWhere;
 				checkForDoublespends(
-					conn, "divisible input", 
+					subBatch, "divisible input", 
 					doubleSpendQuery, doubleSpendVars, 
 					objUnit, objValidationState, 
 					function acceptDoublespends(cb3){
@@ -1749,7 +1757,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 						}
 						mutex.lock(["private_write"], function(unlock){
 							console.log("--- will ununique the conflicts of unit "+objUnit.unit);
-							conn.query(
+							subBatch.sql.query(
 								sql, 
 								doubleSpendVars, 
 								function(){
@@ -1907,7 +1915,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 						return checkInputDoubleSpend(cb);
 					}
 					
-					conn.query(
+					subBatch.sql.query(
 						"SELECT amount, is_stable, sequence, address, main_chain_index, denomination, asset \n\
 						FROM units \n\
 						LEFT JOIN outputs ON units.unit=outputs.unit AND message_index=? AND output_index=? \n\
@@ -1975,7 +1983,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 							// when divisible, the asset is also non-transferrable and auto-destroy, 
 							// then this transfer is a transfer back to the issuer 
 							// and input.unit is known both to payer and the payee (issuer), even if light
-							graph.determineIfIncludedOrEqual(conn, input.unit, objUnit.parent_units, function(bIncluded){
+							graph.determineIfIncludedOrEqual(subBatch.sql, input.unit, objUnit.parent_units, function(bIncluded){
 								if (!bIncluded)
 									return cb("input "+input.unit+" is not in your genes");
 								checkInputDoubleSpend(cb);
@@ -2035,7 +2043,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 					if (conf.storage == "mysql")
 						doubleSpendIndexMySQL = " USE INDEX (byIndexAddress) ";
 
-					mc_outputs.readNextSpendableMcIndex(conn, type, address, objValidationState.arrConflictingUnits, function(next_spendable_mc_index){
+					mc_outputs.readNextSpendableMcIndex(subBatch.sql, type, address, objValidationState.arrConflictingUnits, function(next_spendable_mc_index){
 						if (input.from_main_chain_index < next_spendable_mc_index)
 							return cb(type+" ranges must not overlap"); // gaps allowed, in case a unit becomes bad due to another address being nonserial
 						var max_mci = (type === "headers_commission") 
@@ -2045,7 +2053,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 							return cb(type+" to_main_chain_index is too large");
 
 						var calcFunc = (type === "headers_commission") ? mc_outputs.calcEarnings : paid_witnessing.calcWitnessEarnings;
-						calcFunc(conn, type, input.from_main_chain_index, input.to_main_chain_index, address, {
+						calcFunc(subBatch.sql, type, input.from_main_chain_index, input.to_main_chain_index, address, {
 							ifError: function(err){
 								throw Error(err);
 							},
@@ -2091,7 +2099,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 						if (!objAsset.spender_attested)
 							return cb();
 						storage.filterAttestedAddresses(
-							conn, objAsset, objValidationState.last_ball_mci, arrOutputAddresses, 
+							subBatch.sql, objAsset, objValidationState.last_ball_mci, arrOutputAddresses, 
 							function(arrAttestedOutputAddresses){
 								if (arrAttestedOutputAddresses.length !== arrOutputAddresses.length)
 									return cb("some output addresses are not attested");
@@ -2104,7 +2112,7 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 						if (!arrCondition)
 							return cb();
 						Definition.evaluateAssetCondition(
-							conn, payload.asset, arrCondition, objUnit, objValidationState, 
+							subBatch.sql, payload.asset, arrCondition, objUnit, objValidationState, 
 							function(cond_err, bSatisfiesCondition){
 								if (cond_err)
 									return cb(cond_err);
@@ -2131,8 +2139,8 @@ function validatePaymentInputsAndOutputs(conn, payload, objAsset, message_index,
 }
 
 
-function initPrivatePaymentValidationState(conn, unit, message_index, payload, onError, onDone){
-	conn.query(
+function initPrivatePaymentValidationState(subBatch, unit, message_index, payload, onError, onDone){
+	subBatch.sql.query(
 		"SELECT payload_hash, app, units.sequence, units.version, units.is_stable, lb_units.main_chain_index AS last_ball_mci \n\
 		FROM messages JOIN units USING(unit) \n\
 		LEFT JOIN units AS lb_units ON units.last_ball_unit=lb_units.unit \n\
@@ -2163,10 +2171,10 @@ function initPrivatePaymentValidationState(conn, unit, message_index, payload, o
 				bPrivate: true
 			};
 			var objPartialUnit = {unit: unit};
-			storage.readUnitAuthors(conn, unit, function(arrAuthors){
+			storage.readUnitAuthors(subBatch.sql, unit, function(arrAuthors){
 				objPartialUnit.authors = arrAuthors.map(function(address){ return {address: address}; }); // array of objects {address: address}
 				// we need parent_units in checkForDoublespends in case it is a doublespend
-				conn.query("SELECT parent_unit FROM parenthoods WHERE child_unit=? ORDER BY parent_unit", [unit], function(prows){
+				subBatch.sql.query("SELECT parent_unit FROM parenthoods WHERE child_unit=? ORDER BY parent_unit", [unit], function(prows){
 					objPartialUnit.parent_units = prows.map(function(prow){ return prow.parent_unit; });
 					onDone(bStable, objPartialUnit, objValidationState);
 				});
@@ -2176,7 +2184,7 @@ function initPrivatePaymentValidationState(conn, unit, message_index, payload, o
 }
 
 
-function validateAssetDefinition(conn, payload, objUnit, objValidationState, callback){
+function validateAssetDefinition(subBatch, payload, objUnit, objValidationState, callback){
 	if (objUnit.authors.length !== 1)
 		return callback("asset definition must be single-authored");
 	if (hasFieldsExcept(payload, ["cap", "is_private", "is_transferrable", "auto_destroy", "fixed_denominations", "issued_by_definer_only", "cosigned_by_definer", "spender_attested", "issue_condition", "transfer_condition", "attestors", "denominations"]))
@@ -2251,24 +2259,24 @@ function validateAssetDefinition(conn, payload, objUnit, objValidationState, cal
 		function(cb){
 			if (!("issue_condition" in payload))
 				return cb();
-			Definition.validateDefinition(conn, payload.issue_condition, objUnit, objValidationState, null, true, cb);
+			Definition.validateDefinition(subBatch.sql, payload.issue_condition, objUnit, objValidationState, null, true, cb);
 		},
 		function(cb){
 			if (!("transfer_condition" in payload))
 				return cb();
-			Definition.validateDefinition(conn, payload.transfer_condition, objUnit, objValidationState, null, true, cb);
+			Definition.validateDefinition(subBatch.sql, payload.transfer_condition, objUnit, objValidationState, null, true, cb);
 		}
 	], callback);
 }
 
-function validateAttestorListUpdate(conn, payload, objUnit, objValidationState, callback){
+function validateAttestorListUpdate(subBatch, payload, objUnit, objValidationState, callback){
 	if (objUnit.authors.length !== 1)
 		return callback("attestor list must be single-authored");
 	if (hasFieldsExcept(payload, ['asset', 'attestors']))
 		return callback("foreign fields in attestor list update");
 	if (!isStringOfLength(payload.asset, constants.HASH_LENGTH))
 		return callback("invalid asset in attestor list update");
-	storage.readAsset(conn, payload.asset, objValidationState.last_ball_mci, false, function(err, objAsset){
+	storage.readAsset(subBatch.sql, payload.asset, objValidationState.last_ball_mci, false, function(err, objAsset){
 		if (err)
 			return callback(err);
 		if (!objAsset.spender_attested)
@@ -2300,14 +2308,14 @@ function checkAttestorList(arrAttestors){
 
 
 
-function validateAuthorSignaturesWithoutReferences(objAuthor, objUnit, arrAddressDefinition, callback){
+function validateAuthorSignaturesWithoutReferences(conn, objAuthor, objUnit, arrAddressDefinition, callback){
 	var objValidationState = {
 		unit_hash_to_sign: objectHash.getUnitHashToSign(objUnit),
 		last_ball_mci: -1,
 		bNoReferences: true
 	};
 	Definition.validateAuthentifiers(
-		null, objAuthor.address, null, arrAddressDefinition, objUnit, objValidationState, objAuthor.authentifiers, 
+		conn, objAuthor.address, null, arrAddressDefinition, objUnit, objValidationState, objAuthor.authentifiers, 
 		function(err, res){
 			if (err) // error in address definition
 				return callback(err);

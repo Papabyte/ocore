@@ -7,7 +7,7 @@ var kvstore = require('./kvstore.js');
 var string_utils = require('./string_utils.js');
 var storage = require('./storage.js');
 var ValidationUtils = require("./validation_utils.js");
-
+var batcher = require("./batcher.js");
 
 function dataFeedExists(arrAddresses, feed_name, relation, value, min_mci, max_mci, bAA, handleResult){
 	var start_time = Date.now();
@@ -157,6 +157,7 @@ function dataFeedByAddressExists(address, feed_name, relation, value, min_mci, m
 		};
 	else
 		handleData = function(data){
+			console.log('handleData ' + data);
 			count++;
 			if (bFound)
 				return;
@@ -177,7 +178,7 @@ function dataFeedByAddressExists(address, feed_name, relation, value, min_mci, m
 		console.log('data feed by '+address+' '+feed_name+relation+value+': '+bFound+', '+count_before_found+' / '+count+' records inspected');
 		handleResult(bFound);
 	}
-	var stream = kvstore.createKeyStream(options);
+	var stream = batcher.createKeyStream(options);
 	stream.on('data', handleData)
 	.on('end', onEnd)
 	.on('error', function(error){
@@ -308,7 +309,7 @@ function readDataFeedByAddress(address, feed_name, value, min_mci, max_mci, ifse
 			objResult.mci = mci;
 		}
 	};
-	kvstore.createReadStream(options)
+	batcher.createReadStream(options)
 	.on('data', handleData)
 	.on('end', function(){
 		handleResult(objResult.bAbortedBecauseOfSeveral);

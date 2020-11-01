@@ -30,6 +30,8 @@ var aa_composer = require('./aa_composer.js');
 var formulaEvaluation = require('./formula/evaluation.js');
 var dataFeeds = require('./data_feeds.js');
 var libraryPackageJson = require('./package.json');
+var batcher = require('./batcher.js');
+
 
 var FORWARDING_TIMEOUT = 10*1000; // don't forward if the joint was received more than FORWARDING_TIMEOUT ms ago
 var STALLED_TIMEOUT = 5000; // a request is treated as stalled if no response received within STALLED_TIMEOUT ms
@@ -348,7 +350,7 @@ function findRandomInboundPeer(handleInboundPeer){
 		return handleInboundPeer(null);
 	var arrInboundHosts = arrInboundSources.map(function(ws){ return ws.host; });
 	// filter only those inbound peers that are reversible
-	db.query(
+	batcher.query(
 		"SELECT peer_host FROM peer_host_urls JOIN peer_hosts USING(peer_host) \n\
 		WHERE is_active=1 AND peer_host IN(?) \n\
 			AND (count_invalid_joints/count_new_good_joints<? \n\
@@ -371,7 +373,7 @@ function findRandomInboundPeer(handleInboundPeer){
 
 function checkIfHaveEnoughOutboundPeersAndAdd(){
 	var arrOutboundPeerUrls = arrOutboundPeers.map(function(ws){ return ws.peer; });
-	db.query(
+	batcher.query(
 		"SELECT peer FROM peers JOIN peer_hosts USING(peer_host) \n\
 		WHERE (count_invalid_joints/count_new_good_joints<? \n\
 			OR count_new_good_joints=0 AND count_nonserial_joints=0 AND count_invalid_joints=0) \n\
@@ -605,7 +607,7 @@ function purgePeerEvents(){
     if (conf.storage !== 'sqlite')
         return;
     console.log('will purge peer events');
-    db.query("DELETE FROM peer_events WHERE event_date <= datetime('now', '-0.5 day')", function() {
+    batcher.query("DELETE FROM peer_events WHERE event_date <= datetime('now', '-0.5 day')", function() {
         console.log("deleted some old peer_events");
     });
 }
@@ -1223,6 +1225,8 @@ function handleOnlineJoint(ws, objJoint, onDone){
 function handleSavedJoint(objJoint, creation_ts, peer){
 	
 	var unit = objJoint.unit.unit;
+
+	console.log("handle saved joint " + unit);
 	var ws = getPeerWebSocket(peer);
 	if (ws && ws.readyState !== ws.OPEN)
 		ws = null;
@@ -1249,7 +1253,7 @@ function handleSavedJoint(objJoint, creation_ts, peer){
 		//	throw Error("handleSavedJoint "+objJoint.unit.unit+": need hash tree");
 		},
 		ifNeedParentUnits: function(arrMissingUnits){
-			db.query("SELECT 1 FROM archived_joints WHERE unit IN(?) LIMIT 1", [arrMissingUnits], function(rows){
+			batcher.query("SELECT 1 FROM archived_joints WHERE unit IN(?) LIMIT 1", [arrMissingUnits], function(rows){
 				if (rows.length === 0)
 					throw Error("unit "+unit+" still has unresolved dependencies: "+arrMissingUnits.join(", "));
 				breadcrumbs.add("unit "+unit+" has unresolved dependencies that were archived: "+arrMissingUnits.join(", "))
@@ -1441,7 +1445,7 @@ function notifyWatchers(objJoint, bGoodSequence, source_ws){
 		eventBus.emit("new_my_unit-"+objJoint.unit.unit, objJoint);
 	}
 	else
-		db.query(
+		batcher.query(
 			"SELECT 1 FROM my_addresses WHERE address IN(?) UNION SELECT 1 FROM shared_addresses WHERE shared_address IN(?) UNION SELECT 1 FROM my_watched_addresses WHERE address IN(?)", 
 			[arrAddresses, arrAddresses, arrAddresses], 
 			function(rows){
@@ -1459,7 +1463,7 @@ function notifyWatchers(objJoint, bGoodSequence, source_ws){
 	if (!bWatchingForLight)
 		return;
 	// this is a new unstable joint, light clients will accept it without proof
-	db.query("SELECT peer FROM watched_light_addresses WHERE address IN(?)", [arrAddresses], function(rows){
+	batcher.query("SELECT peer FROM watched_light_addresses WHERE address IN(?)", [arrAddresses], function(rows){
 		if (rows.length === 0)
 			return;
 		if (!objUnit.timestamp)
@@ -1482,7 +1486,7 @@ function notifyWatchers(objJoint, bGoodSequence, source_ws){
 	var arrAuthorAddresses = objAddresses.author_addresses;
 	var arrBaseAAAddresses = objAddresses.base_aa_addresses;
 	var arrAllAAAddresses = arrOutputAddresses.concat(arrBaseAAAddresses);
-	db.query("SELECT peer, address, aa FROM watched_light_aas WHERE aa IN(?)", [arrAllAAAddresses], function (rows) {
+	batcher.query("SELECT peer, address, aa FROM watched_light_aas WHERE aa IN(?)", [arrAllAAAddresses], function (rows) {
 		rows.forEach(function (row) {
 			if ((!row.address || arrAuthorAddresses.includes(row.address)) && arrOutputAddresses.includes(row.aa)) {
 				var ws = getPeerWebSocket(row.peer);
@@ -1522,7 +1526,7 @@ function notifyWatchersAboutStableJoints(mci){
 
 // from_mci is non-inclusive, to_mci is inclusive
 function notifyLightClientsAboutStableJoints(from_mci, to_mci){
-	db.query(
+	batcher.query(
 		"SELECT peer FROM units CROSS JOIN unit_authors USING(unit) CROSS JOIN watched_light_addresses USING(address) \n\
 		WHERE main_chain_index>? AND main_chain_index<=? \n\
 		UNION \n\
@@ -1538,7 +1542,7 @@ function notifyLightClientsAboutStableJoints(from_mci, to_mci){
 				if (ws && ws.readyState === ws.OPEN)
 					sendJustsaying(ws, 'light/have_updates');
 			});
-			db.query("DELETE FROM watched_light_units \n\
+			batcher.query("DELETE FROM watched_light_units \n\
 				WHERE unit IN (SELECT unit FROM units WHERE main_chain_index>? AND main_chain_index<=?)", [from_mci, to_mci], function() {
 				
 			});
@@ -1556,7 +1560,7 @@ function notifyLocalWatchedAddressesAboutStableJoints(mci){
 		}
 	}
 	if (arrWatchedAddresses.length > 0)
-		db.query(
+		batcher.query(
 			"SELECT unit FROM units CROSS JOIN unit_authors USING(unit) \n\
 			WHERE main_chain_index=? AND address IN("+arrWatchedAddresses.map(db.escape).join(', ')+") AND sequence='good' \n\
 			UNION \n\
@@ -1565,7 +1569,7 @@ function notifyLocalWatchedAddressesAboutStableJoints(mci){
 			[mci, mci],
 			handleRows
 		);
-	db.query(
+	batcher.query(
 		"SELECT unit FROM units CROSS JOIN unit_authors USING(unit) CROSS JOIN my_addresses USING(address) WHERE main_chain_index=? AND sequence='good' \n\
 		UNION \n\
 		SELECT unit FROM units CROSS JOIN outputs USING(unit) CROSS JOIN my_addresses USING(address) WHERE main_chain_index=? AND sequence='good' \n\
@@ -1615,7 +1619,7 @@ function aaResponseAffectsAddress(objAAResponse, address) {
 eventBus.on('aa_response', function (objAAResponse) {
 	if (!bWatchingForLight)
 		return;
-	db.query("SELECT peer, address FROM watched_light_aas WHERE aa=?", [objAAResponse.aa_address], function (rows) {
+	batcher.query("SELECT peer, address FROM watched_light_aas WHERE aa=?", [objAAResponse.aa_address], function (rows) {
 		if (rows.length === 0)
 			return;
 		rows.forEach(function (row) {
@@ -1634,7 +1638,7 @@ eventBus.on('aa_definition_saved', function (payload, unit) {
 	var base_aa = payload.definition[1].base_aa;
 	if (!base_aa)
 		return;
-	db.query("SELECT peer FROM watched_light_aas WHERE aa=?", [base_aa], function (rows) {
+	batcher.query("SELECT peer FROM watched_light_aas WHERE aa=?", [base_aa], function (rows) {
 		var arrWses = [];
 		rows.forEach(function (row) {
 			var ws = getPeerWebSocket(row.peer);
@@ -1643,7 +1647,7 @@ eventBus.on('aa_definition_saved', function (payload, unit) {
 		});
 		if (arrWses.length === 0)
 			return;
-		storage.readJoint(db, unit, {
+		storage.readJoint(batcher, unit, {
 			ifNotFound: function () {
 				console.log('recently saved unit ' + unit + ' not found');
 			},
@@ -1692,10 +1696,10 @@ function flushEvents(forceFlushing) {
 		for (var column in columns_obj) {
 			sql_columns_updates.push(column + "=" + column + "+" + columns_obj[column]);
 		}
-		db.query("UPDATE peer_hosts SET "+sql_columns_updates.join()+" WHERE peer_host=?", [host]);
+		batcher.query("UPDATE peer_hosts SET "+sql_columns_updates.join()+" WHERE peer_host=?", [host]);
 	}
 
-	db.query("INSERT INTO peer_events (peer_host, event, event_date) VALUES "+ arrQueryParams.join());
+	batcher.query("INSERT INTO peer_events (peer_host, event, event_date) VALUES "+ arrQueryParams.join());
 	peer_events_buffer = [];
 	objUpdatedHosts = {};
 }
@@ -1705,8 +1709,8 @@ function writeEvent(event, host){
 		return;
 	if (event === 'invalid' || event === 'nonserial'){
 		var column = "count_"+event+"_joints";
-		db.query("UPDATE peer_hosts SET "+column+"="+column+"+1 WHERE peer_host=?", [host]);
-		db.query("INSERT INTO peer_events (peer_host, event) VALUES (?,?)", [host, event]);
+		batcher.query("UPDATE peer_hosts SET "+column+"="+column+"+1 WHERE peer_host=?", [host]);
+		batcher.query("INSERT INTO peer_events (peer_host, event) VALUES (?,?)", [host, event]);
 		if (event === 'invalid')
 			assocBlockedPeers[host] = Date.now();
 		return;
@@ -1729,7 +1733,7 @@ function unblockPeers(){
 }
 
 function initBlockedPeers(){
-	db.query(
+	batcher.query(
 		"SELECT peer_host, MAX("+db.getUnixTimestamp('event_date')+") AS ts FROM peer_events \n\
 		WHERE event_date>"+db.addTime("-1 HOUR")+" AND event='invalid' \n\
 		GROUP BY peer_host",
@@ -1793,7 +1797,7 @@ function onNewAA(objUnit) {
 // catchup
 
 function checkCatchupLeftovers(){
-	db.query(
+	batcher.query(
 		"SELECT 1 FROM hash_tree_balls \n\
 		UNION \n\
 		SELECT 1 FROM catchup_chain_balls \n\
@@ -1815,9 +1819,9 @@ function requestCatchup(ws){
 	console.log("will request catchup from "+ws.peer);
 	eventBus.emit('catching_up_started');
 	if (conf.storage === 'sqlite')
-		db.query("PRAGMA cache_size=-200000", function(){});
-	catchup.purgeHandledBallsFromHashTree(db, function(){
-		db.query(
+		batcher.query("PRAGMA cache_size=-200000", function(){});
+	catchup.purgeHandledBallsFromHashTree(batcher, function(){
+		batcher.query(
 			"SELECT hash_tree_balls.unit FROM hash_tree_balls LEFT JOIN units USING(unit) WHERE units.unit IS NULL ORDER BY ball_index", 
 			function(tree_rows){ // leftovers from previous run
 				if (tree_rows.length > 0){
@@ -1827,7 +1831,7 @@ function requestCatchup(ws){
 					waitTillHashTreeFullyProcessedAndRequestNext(ws);
 					return;
 				}
-				db.query("SELECT 1 FROM catchup_chain_balls LIMIT 1", function(chain_rows){ // leftovers from previous run
+				batcher.query("SELECT 1 FROM catchup_chain_balls LIMIT 1", function(chain_rows){ // leftovers from previous run
 					if (chain_rows.length > 0){
 						bCatchingUp = true;
 						requestNextHashTree(ws);
@@ -1841,7 +1845,7 @@ function requestCatchup(ws){
 					bWaitingForCatchupChain = true;
 					
 					console.log('will read last stable mci for catchup');
-					storage.readLastStableMcIndex(db, function(last_stable_mci){
+					storage.readLastStableMcIndex(batcher, function(last_stable_mci){
 						storage.readLastMainChainIndex(function(last_known_mci){
 							myWitnesses.readMyWitnesses(function(arrWitnesses){
 								var params = {witnesses: arrWitnesses, last_stable_mci: last_stable_mci, last_known_mci: last_known_mci};
@@ -1885,12 +1889,13 @@ function handleCatchupChain(ws, request, response){
 // hash tree
 
 function requestNextHashTree(ws){
+	console.log('requestNextHashTree');
 	eventBus.emit('catchup_next_hash_tree');
-	db.query("SELECT ball FROM catchup_chain_balls ORDER BY member_index LIMIT 2", function(rows){
+	batcher.query("SELECT ball FROM catchup_chain_balls ORDER BY member_index LIMIT 2", function(rows){
 		if (rows.length === 0)
 			return comeOnline();
 		if (rows.length === 1){
-			db.query("DELETE FROM catchup_chain_balls WHERE ball=?", [rows[0].ball], function(){
+			batcher.query("DELETE FROM catchup_chain_balls WHERE ball=?", [rows[0].ball], function(){
 				comeOnline();
 			});
 			return;
@@ -1934,10 +1939,13 @@ function haveManyUnhandledHashTreeBalls(){
 		var unit = storage.assocHashTreeUnitsByBall[ball];
 		if (!storage.assocUnstableUnits[unit]){
 			count++;
-			if (count > 30)
+			if (count > 30){
+				console.log('haveManyUnhandledHashTreeBalls ' + count);
 				return true;
+			}
 		}
 	}
+	console.log('not haveManyUnhandledHashTreeBalls'  + count);
 	return false;
 }
 
@@ -1997,7 +2005,7 @@ function handleOnlinePrivatePayment(ws, arrPrivateElements, bViaHub, callbacks){
 	var savePrivatePayment = function(cb){
 		// we may receive the same unit and message index but different output indexes if recipient and cosigner are on the same device.
 		// in this case, we also receive the same (unit, message_index, output_index) twice - as cosigner and as recipient.  That's why IGNORE.
-		db.query(
+		batcher.query(
 			"INSERT "+db.getIgnore()+" INTO unhandled_private_payments (unit, message_index, output_index, json, peer) VALUES (?,?,?,?,?)", 
 			[unit, message_index, output_index, JSON.stringify(arrPrivateElements), bViaHub ? '' : ws.peer], // forget peer if received via hub
 			function(){
@@ -2058,7 +2066,7 @@ function handleSavedPrivatePayments(unit){
 		var sql = unit
 			? "SELECT json, peer, unit, message_index, output_index, linked FROM unhandled_private_payments WHERE unit="+db.escape(unit)
 			: "SELECT json, peer, unit, message_index, output_index, linked FROM unhandled_private_payments CROSS JOIN units USING(unit)";
-		db.query(sql, function(rows){
+		batcher.query(sql, function(rows){
 			if (rows.length === 0)
 				return unlock();
 			var assocNewUnits = {};
@@ -2425,7 +2433,7 @@ function handleJustsaying(ws, subject, body){
 				return sendError(ws, 'only requested joint can contain a ball');
 			if (conf.bLight && !ws.bLightVendor)
 				return sendError(ws, "I'm a light client and you are not my vendor");
-			db.query("SELECT 1 FROM archived_joints WHERE unit=? AND reason='uncovered'", [objJoint.unit.unit], function(rows){
+			batcher.query("SELECT 1 FROM archived_joints WHERE unit=? AND reason='uncovered'", [objJoint.unit.unit], function(rows){
 				if (rows.length > 0) // ignore it as long is it was unsolicited
 					return sendError(ws, "this unit is already known and archived");
 				if (objectLength.getRatio(objJoint.unit) > 3)
