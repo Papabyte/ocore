@@ -32,26 +32,11 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 	function initConnection(handleConnection) {
 		if (bInLargerTx) {
 			profiler.start();
-<<<<<<< HEAD
-			commit_fn = function (sql, cb) { cb(); };
-			return handleConnection(objValidationState.conn);
-		}
-		db.takeConnectionFromPool(function (conn) {
-			profiler.start();
-			conn.addQuery(arrQueries, "BEGIN");
-			commit_fn = function (sql, cb) {
-				conn.query(sql, function () {
-					cb();
-				});
-			};
-			handleConnection(conn);
-=======
 			return handleConnection(objValidationState.subBatch);
 		}
 		batcher.startSubBatch(function (subBatch) {
 			profiler.start();
 			handleConnection(subBatch);
->>>>>>> writing-batch
 		});
 	}
 	
@@ -649,9 +634,6 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 						saveToKvStore(function(){
 							profiler.stop('write-batch-write');
 							profiler.start();
-<<<<<<< HEAD
-							commit_fn(err ? "ROLLBACK" : "COMMIT", function(){
-=======
 							var start_time = Date.now();
 							if (!bInLargerTx){
 								if (err)
@@ -661,7 +643,6 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 							} else
 								onCommit();
 							function onCommit(){
->>>>>>> writing-batch
 								var consumed_time = Date.now()-start_time;
 								profiler.add_result('write', consumed_time);
 								console.log((err ? (err+", therefore rolled back unit ") : "committed unit ")+objUnit.unit+", write took "+consumed_time+"ms");
