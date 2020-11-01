@@ -140,7 +140,7 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 					subBatch.sql.addQuery(arrQueries, "INSERT "+subBatch.sql.getIgnore()+" INTO addresses (address) VALUES(?)", [author.address]);
 			}
 			else if (objUnit.content_hash)
-				subBatch.sql.addQuery(arrQueries, "INSERT "+conn.getIgnore()+" INTO addresses (address) VALUES(?)", [author.address]);
+				subBatch.sql.addQuery(arrQueries, "INSERT "+subBatch.sql.getIgnore()+" INTO addresses (address) VALUES(?)", [author.address]);
 			subBatch.sql.addQuery(arrQueries, "INSERT INTO unit_authors (unit, address, definition_chash) VALUES(?,?,?)", 
 				[objUnit.unit, author.address, definition_chash]);
 			if (bGenesis)
