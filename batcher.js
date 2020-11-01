@@ -224,7 +224,6 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 					delete kvCacheDel[key];
 
 				bOngoingSubBatch = false;
-				rollbackeds = [];
 				bCommit = false;
 				batch = kvstore.batch();
 				conn.query("COMMIT", function(){
