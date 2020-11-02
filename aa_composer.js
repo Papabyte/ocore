@@ -18,6 +18,7 @@ var mutex = require('./mutex.js');
 var writer = require('./writer.js');
 var conf = require('./conf.js');
 var batcher = require('./batcher.js');
+var profiler = require('./profiler.js');
 
 var getFormula = require('./formula/common.js').getFormula;
 var hasCases = require('./formula/common.js').hasCases;
@@ -866,6 +867,7 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 	function sendUnit(messages) {
 		if (trigger_opts.bAir)
 			return sendDummyUnit(messages);
+		profiler.start();
 		console.log('send unit with messages', JSON.stringify(messages, null, '\t'));
 		var arrUsedOutputIds = [];
 		var arrConsumedOutputs = [];
@@ -1134,6 +1136,7 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 						objUnit.unit = objectHash.getUnitHash(objUnit);
 						console.log('unit', JSON.stringify(objUnit, null, '\t'))
 						executeStateUpdateFormula(objUnit, function (err) {
+							profiler.stop('aa-unit-completion');
 							if (err)
 								return bounce(err);
 							validateAndSaveUnit(objUnit, function (err) {
@@ -1444,8 +1447,10 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 		if (trigger_opts.bAir)
 			return bounce(err);
 		Object.keys(stateVars).forEach(function (address) { delete stateVars[address]; });
+		profiler.start();
 		subBatch.kv.clear();
 		subBatch.sql.query("ROLLBACK TO SAVEPOINT initial_balances", function () {
+			profiler.stop('aa-revert');
 			console.log('done revert: ' + err);
 			bounce(err);
 		});
@@ -1521,8 +1526,9 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 				}
 			}
 		}
-
+		profiler.start();
 		evaluateAA(arrDefinition, function (err) {
+			profiler.stop('aa-evaluate');
 			if (err)
 				return bounce(err);
 			var messages = template.messages;
@@ -1659,8 +1665,10 @@ function checkBalances() {
 						});
 					},
 					function () {
-						subBatch.release();
-						unlock();
+						subBatch.release(function(){
+							unlock();
+						});
+						
 					}
 				);
 			});

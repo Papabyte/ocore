@@ -12,6 +12,7 @@ var mutex = require('./mutex.js');
 var conf = require('./conf.js');
 var breadcrumbs = require('./breadcrumbs.js');
 var batcher = require('./batcher.js');
+var profiler = require('./profiler.js');
 
 
 var assocKnownBadJoints = {};
@@ -55,10 +56,12 @@ function checkIfNewJoint(objJoint, callbacks) {
 
 function removeUnhandledJointAndDependencies(unit, onDone){
 	batcher.startSubBatch(function(subBatch){
+		profiler.start();
 		var arrQueries = [];
 		subBatch.sql.addQuery(arrQueries, "DELETE FROM unhandled_joints WHERE unit=?", [unit]);
 		subBatch.sql.addQuery(arrQueries, "DELETE FROM dependencies WHERE unit=?", [unit]);
 		async.series(arrQueries, function(){
+			profiler.stop('dependencies-remove');
 			subBatch.release(function(){
 				delete assocUnhandledUnits[unit];
 				if (onDone)
@@ -74,6 +77,7 @@ function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer
 	console.log("will save dependencies for " + unit + " " + JSON.stringify(arrMissingParentUnits));
 	mutex.lock(["dependencies"], function(unlock){
 		batcher.startSubBatch(function(subBatch){
+			profiler.start();
 			var sql = "INSERT "+subBatch.sql.getIgnore()+" INTO dependencies (unit, depends_on_unit) VALUES " + arrMissingParentUnits.map(function(missing_unit){
 				return "("+subBatch.sql.escape(unit)+", "+subBatch.sql.escape(missing_unit)+")";
 			}).join(", ");
@@ -81,6 +85,7 @@ function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer
 			subBatch.sql.addQuery(arrQueries, "INSERT "+subBatch.sql.getIgnore()+" INTO unhandled_joints (unit, json, peer) VALUES (?, ?, ?)", [unit, JSON.stringify(objJoint), peer]);
 			subBatch.sql.addQuery(arrQueries, sql);
 			async.series(arrQueries, function(){
+				profiler.stop('dependencies-save');
 				subBatch.release(function(){
 					console.log('done writing dependencies for ' + unit)
 					if (onDone)
@@ -96,7 +101,6 @@ function saveUnhandledJointAndDependencies(objJoint, arrMissingParentUnits, peer
 // handleDependentJoint called for each dependent unit
 function readDependentJointsThatAreReady(unit, handleDependentJoint){
 	console.log("readDependentJointsThatAreReady "+unit);
-	var t=Date.now();
 	var from = unit ? "FROM dependencies AS src_deps JOIN dependencies USING(unit)" : "FROM dependencies";
 	var where = unit ? "WHERE src_deps.depends_on_unit="+db.escape(unit) : "";
 	var lock = unit ? mutex.lock : mutex.lockOrSkip;

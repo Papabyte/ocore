@@ -310,14 +310,12 @@ function validate(objJoint, callbacks, externalSubBatch) {
 				}
 				else{
 					profiler.stop('validation-messages');
-					profiler.start();
 					commit_fn(function(){
 						var consumed_time = Date.now()-start_time;
 						profiler.add_result('validation', consumed_time);
 						console.log(objUnit.unit+" validation ok took "+consumed_time+"ms");
 					//	if (!externalsubBatch.sql)
 					//		conn.release();
-						profiler.stop('validation-commit');
 						if (objJoint.unsigned){
 							unlock();
 							callbacks.ifOkUnsigned(objValidationState.sequence === 'good');

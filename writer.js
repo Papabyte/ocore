@@ -619,12 +619,10 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 							}
 							if (bCordova) // already written to joints table
 								return cb();
-							var batch_start_time = Date.now();
 							subBatch.kv.put('j\n'+objUnit.unit, JSON.stringify(objJoint));
 							if (bInLargerTx)
 								return cb();
 							subBatch.kv.write(function(err){
-								console.log("batch write took "+(Date.now()-batch_start_time)+'ms');
 								if (err)
 									throw Error("writer: batch write failed: "+err);
 								cb();
@@ -632,8 +630,7 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 						}
 						
 						saveToKvStore(function(){
-							profiler.stop('write-batch-write');
-							profiler.start();
+							profiler.stop('write-kv');
 							var start_time = Date.now();
 							if (!bInLargerTx){
 								if (err)
@@ -646,7 +643,6 @@ function saveJoint(objJoint, objValidationState, preCommitCallback, onDone) {
 								var consumed_time = Date.now()-start_time;
 								profiler.add_result('write', consumed_time);
 								console.log((err ? (err+", therefore rolled back unit ") : "committed unit ")+objUnit.unit+", write took "+consumed_time+"ms");
-								profiler.stop('write-sql-commit');
 								profiler.increment();
 								if (err) {
 									var headers_commission = require("./headers_commission.js");

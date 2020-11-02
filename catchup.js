@@ -11,6 +11,7 @@ var witnessProof = require('./witness_proof.js');
 var proofChain = require('./proof_chain.js');
 var batcher = require('./batcher.js');
 var MAX_CATCHUP_CHAIN_LENGTH = 1000000; // how many MCIs long
+var profiler = require('./profiler.js');
 
 
 function prepareCatchupChain(catchupRequest, callbacks){
@@ -262,6 +263,7 @@ function readHashTree(hashTreeRequest, callbacks){
 	if (typeof to_ball !== 'string')
 		return callbacks.ifError("no to_ball");
 	var start_ts = Date.now();
+	profiler.start();
 	var from_mci;
 	var to_mci;
 	batcher.query(
@@ -322,6 +324,7 @@ function readHashTree(hashTreeRequest, callbacks){
 							);
 						},
 						function(){
+							profiler.stop('read-hash-tree');
 							console.log("readHashTree for "+JSON.stringify(hashTreeRequest)+" took "+(Date.now()-start_ts)+'ms');
 							callbacks.ifOk(arrBalls);
 						}
@@ -343,7 +346,7 @@ function processHashTree(arrBalls, callbacks){
 			
 			batcher.startSubBatch(function(batcher){
 				
-					
+					profiler.start();
 					var max_mci = null;
 					async.eachSeries(
 						arrBalls,
@@ -411,12 +414,17 @@ function processHashTree(arrBalls, callbacks){
 						function(error){
 							
 							function finish(err){
+								profiler.stop('process-hash-tree-raw');
 								if (err)
-									batcher.rollback();
+									batcher.rollback(unlockAndExecuteCallbacks);
 								else
-									batcher.release();
-								unlock();
-								err ? callbacks.ifError(err) : callbacks.ifOk();
+									batcher.release(unlockAndExecuteCallbacks);
+	
+								function unlockAndExecuteCallbacks(){
+									unlock();
+									err ? callbacks.ifError(err) : callbacks.ifOk();
+								}
+
 							}
 
 							if (error)

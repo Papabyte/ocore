@@ -4,6 +4,7 @@ var db = require('./db.js');
 var kvstore = require('./kvstore.js');
 var EventEmitter = require('events').EventEmitter;
 var util = require('util');
+var profiler = require('./profiler.js');
 
 var conn;
 var batch;
@@ -87,12 +88,14 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 
 		var objSubBatchFunctions = {
 			release:function(cb){ // virtually commit a sub batch
+				profiler.start();
 				conn.query("RELEASE spt_sub_batch", function(){
 					console.log("sub batch released")
 					commitBatchIfNecessary(cb);
 				})
 			},
 			rollback:function(cb){  // virtually rollback a sub batch
+				profiler.start();
 				conn.query("ROLLBACK TO spt_sub_batch", function(){
 					console.log("sub batch rollbacked")
 					commitBatchIfNecessary(cb);
@@ -185,6 +188,7 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 			console.log('will commit batch')
 
 			commitBatch(function(){
+				profiler.stop('batch-commit');
 				bOngoingBatch= false;
 				conn.release();
 				conn = null;
@@ -202,7 +206,7 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 					commitBatch();
 				}
 			}, 1000);*/
-
+			profiler.stop('sub-batch-end');
 			console.log('no batch commit yet')
 			if (cb)
 				cb();
