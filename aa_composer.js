@@ -867,7 +867,6 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 	function sendUnit(messages) {
 		if (trigger_opts.bAir)
 			return sendDummyUnit(messages);
-		profiler.start();
 		console.log('send unit with messages', JSON.stringify(messages, null, '\t'));
 		var arrUsedOutputIds = [];
 		var arrConsumedOutputs = [];
@@ -1136,7 +1135,6 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 						objUnit.unit = objectHash.getUnitHash(objUnit);
 						console.log('unit', JSON.stringify(objUnit, null, '\t'))
 						executeStateUpdateFormula(objUnit, function (err) {
-							profiler.stop('aa-unit-completion');
 							if (err)
 								return bounce(err);
 							validateAndSaveUnit(objUnit, function (err) {
