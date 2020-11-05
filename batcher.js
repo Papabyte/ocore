@@ -6,6 +6,8 @@ var EventEmitter = require('events').EventEmitter;
 var util = require('util');
 var profiler = require('./profiler.js');
 
+var bCordova = (typeof window !== 'undefined' && window && window.cordova);
+
 var conn;
 var batch;
 
@@ -49,7 +51,7 @@ exports.query = function(sql, args, cb) { // execute a SQL query as soon as poss
 }
 
 exports.startSubBatch = function(callback){ // start a subbatch as soon as a connection from pool is available
-
+	console.log('startSubBatch ' + bOngoingSubBatch + ' ' + bWaitingConnection + ' ' +bCommittingBatch)
 	if (!bOngoingBatch && !bWaitingConnection){
 		console.log('start new batch ');
 		bWaitingConnection = true;
@@ -58,7 +60,13 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 		setTimeout(function(){
 			bCommit = true;
 		}, 1200);
-		batch = kvstore.batch();
+		batch = bCordova ? { 
+			get: ()=>{},
+			put: ()=>{},
+			del: ()=>{},
+			clear: ()=>{},
+			write: (cb)=>{cb();}
+		} : kvstore.batch();
 		db.takeConnectionFromPool(function (_conn) {
 			conn = _conn;
 			conn.query("BEGIN", function(){
@@ -75,10 +83,11 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 		})
 	} else if (!bOngoingSubBatch && !bWaitingConnection && !bCommittingBatch) {
 		bOngoingSubBatch = true;
-		console.log('already in batch, start new sub batch')
+		console.log('already in batch, start new sub batch ' + arrSubBatches.length)
 		conn.query("SAVEPOINT spt_sub_batch", function(){
 			callback(createSubBatchfunctions());
 		});
+
 	} else {
 		console.log('subbatch ongoing, will queue');
 		arrSubBatches.push(callback);
@@ -102,27 +111,7 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 				})
 			},
 
-			sql: {
-				query: function(sql, args, cb){ // in sub batch query
-					if (cb)
-						conn.query(sql, args, cb)
-					else
-						conn.query(sql, args)
-				},
-				cquery:function(sql, args, cb){
-					if (cb)
-						conn.cquery(sql, args, cb)
-					else
-						conn.cquery(sql, args)
-				}, 
-				addQuery:conn.addQuery,
-				getFromUnixTime: conn.getFromUnixTime,
-				getIgnore: conn.getIgnore,
-				escape: conn.escape,
-				dropTemporaryTable: conn.dropTemporaryTable,
-				getUnixTimestamp: conn.getUnixTimestamp
-		
-			},
+			sql: conn,
 			kv: {
 				get: function(key, cb){ // get merged kv data from sub batch cache, batch cache and rocksdb
 					console.log("look for key " + key);
@@ -189,7 +178,7 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 
 			commitBatch(function(){
 				profiler.stop('batch-commit');
-				bOngoingBatch= false;
+				bOngoingBatch = false;
 				conn.release();
 				conn = null;
 				if (cb)
@@ -208,9 +197,9 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 			}, 1000);*/
 			profiler.stop('sub-batch-end');
 			console.log('no batch commit yet')
+			bOngoingSubBatch = false;
 			if (cb)
 				cb();
-			bOngoingSubBatch = false;
 			processNextSubBatch();
 		}
 
@@ -240,6 +229,7 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 		}
 
 		function processNextSubBatch(){
+			console.log('processNextSubBatch '+ arrSubBatches.length)
 			if (arrSubBatches.length === 0)
 				return;
 			console.log("unqueue subbatch");
@@ -271,7 +261,6 @@ var createReadStream = function(options){ // create a read stream merging kv bat
 	}
 
 	function onEnd(){
-		console.log("createReadStream batch cache state");
 		for (var key in kvCachePut){
 			if (options.gt && key <= options.gt){
 				continue;

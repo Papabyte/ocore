@@ -20,6 +20,7 @@ var aa_composer = require('../aa_composer.js');
 var storage = require('../storage.js');
 var eventBus = require('../event_bus.js');
 var network = require('../network.js'); // to initialize caches
+var batcher = require('../batcher.js');
 var test = require('ava');
 
 process.on('unhandledRejection', up => { throw up; });
@@ -43,6 +44,20 @@ async function asyncAddAA(aa) {
 	await db.query("INSERT " + db.getIgnore() + " INTO addresses (address) VALUES(?)", [address]);
 	await storage.insertAADefinitions(db, [{ address, definition: aa }], constants.GENESIS_UNIT, 1, false);
 }
+
+function addAAInSubBatch(aa) {
+	return new Promise(function(resolve){
+	console.log('addAAInSubBatch')
+		batcher.startSubBatch(async function(subBatch){
+			var address = objectHash.getChash160(aa);
+			await subBatch.sql.query("INSERT " + subBatch.sql.getIgnore() + " INTO addresses (address) VALUES(?)", [address]);
+			await storage.insertAADefinitions(subBatch.sql, [{ address, definition: aa }], constants.GENESIS_UNIT, 1, false);
+			subBatch.release();
+			resolve();
+		});
+	});
+}
+
 
 var old_cache = {};
 
@@ -98,7 +113,7 @@ test.cb.serial('AA with response vars', t => {
 		t.deepEqual(err, null);
 
 		var address = objectHash.getChash160(aa);
-		await addAA(aa);
+		await addAA(aa); // no subbatch is started yet
 		
 		aa_composer.dryRunPrimaryAATrigger(trigger, address, aa, (arrResponses) => {
 			t.deepEqual(arrResponses.length, 1);
@@ -133,7 +148,7 @@ test.cb.serial('less than bounce fees', t => {
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	addAA(aa);
+	addAAInSubBatch(aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, address, aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 1);
@@ -180,7 +195,7 @@ test.cb.serial('chain of AAs', t => {
 		]
 	}];
 	var secondary_address = objectHash.getChash160(secondary_aa);
-	addAA(secondary_aa);
+	addAAInSubBatch(secondary_aa);
 
 	var primary_aa = ['autonomous agent', {
 		bounce_fees: { base: 10000 },
@@ -206,7 +221,7 @@ test.cb.serial('chain of AAs', t => {
 		]
 	}];
 	var primary_address = objectHash.getChash160(primary_aa);
-	addAA(primary_aa);
+	addAAInSubBatch(primary_aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, primary_address, primary_aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 2);
@@ -257,7 +272,7 @@ test.cb.serial('AA with state changes only', t => {
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	addAA(aa);
+	addAAInSubBatch(aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, address, aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 1);
@@ -299,7 +314,7 @@ test.cb.serial('AA with insufficient balance for storage', t => {
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	addAA(aa);
+	addAAInSubBatch(aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, address, aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 1);
@@ -339,7 +354,7 @@ test.cb.serial('AA with storage < 60 bytes', t => {
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	addAA(aa);
+	addAAInSubBatch(aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, address, aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 1);
@@ -374,7 +389,7 @@ test.cb.serial('recently defined asset', t => {
 		]
 	}];
 	var secondary_address = objectHash.getChash160(secondary_aa);
-	addAA(secondary_aa);
+	addAAInSubBatch(secondary_aa);
 
 	var primary_aa = ['autonomous agent', {
 		messages: [
@@ -409,7 +424,7 @@ test.cb.serial('recently defined asset', t => {
 		]
 	}];
 	var primary_address = objectHash.getChash160(primary_aa);
-	addAA(primary_aa);
+	addAAInSubBatch(primary_aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, primary_address, primary_aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 2);
@@ -461,7 +476,7 @@ test.cb.serial('issue recently defined asset', t => {
 		]
 	}];
 	var bouncer_address = objectHash.getChash160(bouncer_aa);
-	addAA(bouncer_aa);
+	addAAInSubBatch(bouncer_aa);
 
 	var asset_aa = ['autonomous agent', {
 		messages: {
@@ -515,7 +530,7 @@ test.cb.serial('issue recently defined asset', t => {
 		}
 	}];
 	var asset_address = objectHash.getChash160(asset_aa);
-	addAA(asset_aa);
+	addAAInSubBatch(asset_aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, asset_address, asset_aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 3);
@@ -580,7 +595,7 @@ test.cb.serial('define new AA and activate it', t => {
 		]
 	}];
 	var forwarder_address = objectHash.getChash160(forwarder_aa);
-	addAA(forwarder_aa);
+	addAAInSubBatch(forwarder_aa);
 
 
 	var definition_aa = ['autonomous agent', {
@@ -609,7 +624,7 @@ test.cb.serial('define new AA and activate it', t => {
 		]
 	}];
 	var definition_aa_address = objectHash.getChash160(definition_aa);
-	addAA(definition_aa);
+	addAAInSubBatch(definition_aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, definition_aa_address, definition_aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 3);
@@ -670,14 +685,14 @@ test.cb.serial('parameterized AA', t => {
 		]
 	}];
 	var base_aa_address = objectHash.getChash160(base_aa);
-	addAA(base_aa);
+	addAAInSubBatch(base_aa);
 
 	var parameterized_aa = ['autonomous agent', {
 		base_aa: base_aa_address,
 		params: {expiry: '2020-01-31', fee: 2000},
 	}]
 	var parameterized_aa_address = objectHash.getChash160(parameterized_aa);
-	addAA(parameterized_aa);
+	addAAInSubBatch(parameterized_aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, parameterized_aa_address, parameterized_aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 1);
@@ -732,14 +747,14 @@ test.cb.serial('reading definition in parameterized AA', t => {
 		]
 	}];
 	var base_aa_address = objectHash.getChash160(base_aa);
-	addAA(base_aa);
+	addAAInSubBatch(base_aa);
 
 	var parameterized_aa = ['autonomous agent', {
 		base_aa: base_aa_address,
 		params: {expiry: '2020-01-31', fee: 2000},
 	}]
 	var parameterized_aa_address = objectHash.getChash160(parameterized_aa);
-	addAA(parameterized_aa);
+	addAAInSubBatch(parameterized_aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, parameterized_aa_address, parameterized_aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 1);
@@ -786,7 +801,7 @@ test.cb.serial('AA with functions', t => {
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	addAA(aa);
+	addAAInSubBatch(aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, address, aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 1);
@@ -832,7 +847,7 @@ test.cb.serial('AA with messages composed of objects', t => {
 		t.deepEqual(err, null);
 
 		var address = objectHash.getChash160(aa);
-		addAA(aa);
+		addAAInSubBatch(aa);
 		
 		aa_composer.dryRunPrimaryAATrigger(trigger, address, aa, (arrResponses) => {
 			t.deepEqual(arrResponses.length, 1);
@@ -881,7 +896,7 @@ test.cb.serial('AA with generated messages', t => {
 		t.deepEqual(err, null);
 
 		var address = objectHash.getChash160(aa);
-		addAA(aa);
+		addAAInSubBatch(aa);
 		
 		aa_composer.dryRunPrimaryAATrigger(trigger, address, aa, (arrResponses) => {
 			t.deepEqual(arrResponses.length, 1);
@@ -968,7 +983,7 @@ test.cb.serial('AA with generated definition of new AA and immediately sending t
 		t.deepEqual(err, null);
 
 		var factory_address = objectHash.getChash160(factory_aa);
-		addAA(factory_aa);
+		addAAInSubBatch(factory_aa);
 		
 		aa_composer.dryRunPrimaryAATrigger(trigger, factory_address, factory_aa, (arrResponses) => {
 			t.deepEqual(arrResponses.length, 2);
@@ -1006,7 +1021,7 @@ test.cb.serial('trying to modify a var conditionally frozen in an earlier formul
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	addAA(aa);
+	addAAInSubBatch(aa);
 	
 	aa_composer.dryRunPrimaryAATrigger(trigger, address, aa, (arrResponses) => {
 		t.deepEqual(arrResponses.length, 1);
@@ -1076,13 +1091,13 @@ test.cb.serial('calling a remote function', t => {
 
 	validateAA(remote_aa, async err => {
 		t.deepEqual(err, null);
-		await asyncAddAA(remote_aa);
+		await addAAInSubBatch(remote_aa);
 
 		validateAA(aa, async err => {
 			t.deepEqual(err, null);
 
 			var aa_address = objectHash.getChash160(aa);
-			await asyncAddAA(aa);
+			await addAAInSubBatch(aa);
 			
 			aa_composer.dryRunPrimaryAATrigger(trigger, aa_address, aa, (arrResponses) => {
 				t.deepEqual(arrResponses.length, 1);
@@ -1175,37 +1190,41 @@ test.cb.serial('calling a remote function in a parameterized AA', t => {
 
 	validateAA(remote_base_aa, async err => {
 		t.deepEqual(err, null);
-		await asyncAddAA(remote_base_aa);
+		await addAAInSubBatch(remote_base_aa);
 
 		validateAA(remote_aa, async err => {
 			t.deepEqual(err, null);
-			await asyncAddAA(remote_aa);
-			await db.query("UPDATE aa_addresses SET storage_size=100 WHERE address=?", [remote_aa_address]);
-			var objLastStableMcUnitProps = await storage.readLastStableMcUnitProps(db);
-
-			validateAA(aa, async err => {
-				t.deepEqual(err, null);
-				await asyncAddAA(aa);
-				
-				aa_composer.dryRunPrimaryAATrigger(trigger, aa_address, aa, (arrResponses) => {
-					t.deepEqual(arrResponses.length, 1);
-					t.deepEqual(arrResponses[0].bounced, false);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].sq.value, 25);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].this.value, remote_aa_address);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].bal.value, 0);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].fee.value, 0.02);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].vvv.value, 'fff');
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].ss.value, 100);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].ts.value, objLastStableMcUnitProps.timestamp);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].mci.value, objLastStableMcUnitProps.main_chain_index);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].a.value, 10);
-					fixCache();
-					t.deepEqual(storage.assocUnstableUnits, old_cache.assocUnstableUnits);
-					t.deepEqual(storage.assocStableUnits, old_cache.assocStableUnits);
-					t.deepEqual(storage.assocUnstableMessages, old_cache.assocUnstableMessages);
-					t.deepEqual(storage.assocBestChildren, old_cache.assocBestChildren);
-					t.deepEqual(storage.assocStableUnitsByMci, old_cache.assocStableUnitsByMci);
-					t.end();
+			await addAAInSubBatch(remote_aa);
+			batcher.startSubBatch(async function(subBatch){
+				await subBatch.sql.query("UPDATE aa_addresses SET storage_size=100 WHERE address=?", [remote_aa_address]);
+				var objLastStableMcUnitProps = await storage.readLastStableMcUnitProps(subBatch.sql);
+				console.log('objLastStableMcUnitProps ' + objLastStableMcUnitProps)
+				subBatch.release();
+				validateAA(aa, async err => {
+					console.log('validateAA')
+					t.deepEqual(err, null);
+					await addAAInSubBatch(aa);
+					
+					aa_composer.dryRunPrimaryAATrigger(trigger, aa_address, aa, (arrResponses) => {
+						t.deepEqual(arrResponses.length, 1);
+						t.deepEqual(arrResponses[0].bounced, false);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].sq.value, 25);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].this.value, remote_aa_address);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].bal.value, 0);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].fee.value, 0.02);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].vvv.value, 'fff');
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].ss.value, 100);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].ts.value, objLastStableMcUnitProps.timestamp);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].mci.value, objLastStableMcUnitProps.main_chain_index);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].a.value, 10);
+						fixCache();
+						t.deepEqual(storage.assocUnstableUnits, old_cache.assocUnstableUnits);
+						t.deepEqual(storage.assocStableUnits, old_cache.assocStableUnits);
+						t.deepEqual(storage.assocUnstableMessages, old_cache.assocUnstableMessages);
+						t.deepEqual(storage.assocBestChildren, old_cache.assocBestChildren);
+						t.deepEqual(storage.assocStableUnitsByMci, old_cache.assocStableUnitsByMci);
+						t.end();
+					});
 				});
 			});
 		});
@@ -1318,48 +1337,51 @@ test.cb.serial('calling a chain of remote functions', t => {
 
 	validateAA(remote_aa, async err => {
 		t.deepEqual(err, null);
-		await asyncAddAA(remote_aa);
+		await addAAInSubBatch(remote_aa);
 
 		validateAA(remote_intermediary_aa, async err => {
 			t.deepEqual(err, null);
-			await asyncAddAA(remote_intermediary_aa);
+			await addAAInSubBatch(remote_intermediary_aa);
 
-			await db.query("UPDATE aa_addresses SET storage_size=100 WHERE address=?", [remote_aa_address]);
-			await db.query("UPDATE aa_addresses SET storage_size=200 WHERE address=?", [remote_intermediary_aa_address]);
-			var objLastStableMcUnitProps = await storage.readLastStableMcUnitProps(db);
-			var ts = objLastStableMcUnitProps.timestamp;
-			var mci = objLastStableMcUnitProps.main_chain_index;
+			batcher.startSubBatch(async function(subBatch){
+				await subBatch.sql.query("UPDATE aa_addresses SET storage_size=100 WHERE address=?", [remote_aa_address]);
+				await subBatch.sql.query("UPDATE aa_addresses SET storage_size=200 WHERE address=?", [remote_intermediary_aa_address]);
+				var objLastStableMcUnitProps = await storage.readLastStableMcUnitProps(subBatch.sql);
+				subBatch.release();
+				var ts = objLastStableMcUnitProps.timestamp;
+				var mci = objLastStableMcUnitProps.main_chain_index;
 
-			validateAA(aa, async err => {
-				t.deepEqual(err, null);
-				await asyncAddAA(aa);
-				
-				aa_composer.dryRunPrimaryAATrigger(trigger, aa_address, aa, (arrResponses) => {
-					t.deepEqual(arrResponses.length, 1);
-					t.deepEqual(arrResponses[0].bounced, false);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_sq.value, 25);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_this.value, remote_aa_address);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_bal.value, 0);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_ss.value, 100);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_ts.value, ts);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_mci.value, mci);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_a.value, 10);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_origin_aa.value, remote_aa_address);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].this.value, remote_intermediary_aa_address);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].bal.value, 0);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].ss.value, 200);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].ts.value, ts);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].mci.value, mci);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].h.value, 15);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].mul.value, 7.5);
-					t.deepEqual(arrResponses[0].updatedStateVars[aa_address].g.value, 9);
-					fixCache();
-					t.deepEqual(storage.assocUnstableUnits, old_cache.assocUnstableUnits);
-					t.deepEqual(storage.assocStableUnits, old_cache.assocStableUnits);
-					t.deepEqual(storage.assocUnstableMessages, old_cache.assocUnstableMessages);
-					t.deepEqual(storage.assocBestChildren, old_cache.assocBestChildren);
-					t.deepEqual(storage.assocStableUnitsByMci, old_cache.assocStableUnitsByMci);
-					t.end();
+				validateAA(aa, async err => {
+					t.deepEqual(err, null);
+					await addAAInSubBatch(aa);
+					
+					aa_composer.dryRunPrimaryAATrigger(trigger, aa_address, aa, (arrResponses) => {
+						t.deepEqual(arrResponses.length, 1);
+						t.deepEqual(arrResponses[0].bounced, false);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_sq.value, 25);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_this.value, remote_aa_address);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_bal.value, 0);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_ss.value, 100);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_ts.value, ts);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_mci.value, mci);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_a.value, 10);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].origin_origin_aa.value, remote_aa_address);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].this.value, remote_intermediary_aa_address);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].bal.value, 0);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].ss.value, 200);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].ts.value, ts);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].mci.value, mci);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].h.value, 15);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].mul.value, 7.5);
+						t.deepEqual(arrResponses[0].updatedStateVars[aa_address].g.value, 9);
+						fixCache();
+						t.deepEqual(storage.assocUnstableUnits, old_cache.assocUnstableUnits);
+						t.deepEqual(storage.assocStableUnits, old_cache.assocStableUnits);
+						t.deepEqual(storage.assocUnstableMessages, old_cache.assocUnstableMessages);
+						t.deepEqual(storage.assocBestChildren, old_cache.assocBestChildren);
+						t.deepEqual(storage.assocStableUnitsByMci, old_cache.assocStableUnitsByMci);
+						t.end();
+					});
 				});
 			});
 		});
@@ -1430,14 +1452,14 @@ test.cb.serial('map/reduce with a remote function', t => {
 	validateAA(remote_aa, async err => {
 		t.deepEqual(err, null);
 		console.log('--- val remote', err);
-		await asyncAddAA(remote_aa);
+		await addAAInSubBatch(remote_aa);
 
 		validateAA(aa, async err => {
 			t.deepEqual(err, null);
 			console.log('--- val', err);
 
 			var aa_address = objectHash.getChash160(aa);
-			await asyncAddAA(aa);
+			await addAAInSubBatch(aa);
 			
 			aa_composer.dryRunPrimaryAATrigger(trigger, aa_address, aa, (arrResponses) => {
 				t.deepEqual(arrResponses.length, 1);
@@ -1508,13 +1530,13 @@ test.cb.serial('calling a remote function that fails', t => {
 
 	validateAA(remote_aa, async err => {
 		t.deepEqual(err, null);
-		await asyncAddAA(remote_aa);
+		await addAAInSubBatch(remote_aa);
 
 		validateAA(aa, async err => {
 			t.deepEqual(err, null);
 
 			var aa_address = objectHash.getChash160(aa);
-			await asyncAddAA(aa);
+			await addAAInSubBatch(aa);
 			
 			aa_composer.dryRunPrimaryAATrigger(trigger, aa_address, aa, (arrResponses) => {
 				t.deepEqual(arrResponses.length, 1);

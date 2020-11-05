@@ -941,8 +941,7 @@ function readAAStateVars(address, var_prefix_from, var_prefix_to, limit, handle)
 	var handleData = function (data){
 		assignField(objStateVars, data.key.slice(36), parseStateVar(data.value));
 	}
-	var kvstore = require('./kvstore.js');
-	var stream = kvstore.createReadStream(options);
+	var stream = batcher.createReadStream(options);
 	stream.on('data', handleData)
 	.on('end', function(){
 		handle(objStateVars);

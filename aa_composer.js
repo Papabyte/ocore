@@ -199,27 +199,23 @@ function validateAATriggerObject(trigger, handle) {
 }
 
 function dryRunPrimaryAATrigger(trigger, address, arrDefinition, onDone) {
-	db.takeConnectionFromPool(function (conn) {
-		conn.query("BEGIN", function () {
-			var batch = conf.bLight ? lightBatch : kvstore.batch();
-			readLastStableMcUnit(conn, function (mci, objMcUnit) {
-				trigger.unit = objMcUnit.unit;
-				if (!trigger.address)
-					trigger.address = objMcUnit.authors[0].address;
-				trigger.initial_address = trigger.address;
-				trigger.initial_unit = trigger.unit;
-				var fPrepare = function (cb) {
-					insertFakeOutputsIntoMcUnit(conn, objMcUnit, trigger.outputs, address, cb);
-				};
-				fPrepare(function () {
-					var arrResponses = [];
-					handleTrigger(conn, batch, trigger, {}, {}, arrDefinition, address, mci, objMcUnit, false, arrResponses, function () {
-						revertResponsesInCaches(arrResponses);
-						batch.clear();
-						conn.query("ROLLBACK", function () {
-							conn.release();
-							onDone(arrResponses);
-						});
+	batcher.startSubBatch(function (subBatch) {
+		readLastStableMcUnit(subBatch.sql, function (mci, objMcUnit) {
+			trigger.unit = objMcUnit.unit;
+			if (!trigger.address)
+				trigger.address = objMcUnit.authors[0].address;
+			trigger.initial_address = trigger.address;
+			trigger.initial_unit = trigger.unit;
+			var fPrepare = function (cb) {
+				insertFakeOutputsIntoMcUnit(subBatch.sql, objMcUnit, trigger.outputs, address, cb);
+			};
+			fPrepare(function () {
+				var arrResponses = [];
+				handleTrigger(subBatch, trigger, {}, {}, arrDefinition, address, mci, objMcUnit, false, arrResponses, function () {
+					revertResponsesInCaches(arrResponses);
+					subBatch.kv.clear();
+					subBatch.rollback(function () {
+						onDone(arrResponses);
 					});
 				});
 			});
@@ -520,7 +516,7 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 			var f = getFormula(name);
 			if (f !== null) {
 				var opts = {
-					subBatch: subBatch,
+					conn: subBatch.sql,
 					formula: f,
 					trigger: trigger,
 					params: params,
@@ -562,7 +558,7 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 				return cb();
 			}
 			var opts = {
-				subBatch: subBatch,
+				conn: subBatch.sql,
 				formula: f,
 				trigger: trigger,
 				params: params,
@@ -602,7 +598,7 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 						return cb2("case if is not a formula: " + acase.if);
 					var locals_tmp = _.clone(locals); // separate copy for each iteration of eachSeries
 					var opts = {
-						subBatch: subBatch,
+						conn: subBatch.sql,
 						formula: f,
 						trigger: trigger,
 						params: params,
@@ -638,7 +634,7 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 					if (f === null)
 						return cb("case init is not a formula: " + thecase.init);
 					var opts = {
-						subBatch: subBatch,
+						conn: subBatch.sql,
 						formula: f,
 						trigger: trigger,
 						params: params,
@@ -665,7 +661,7 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 				if (f === null)
 					return cb("if is not a formula: " + value.if);
 				var opts = {
-					subBatch: subBatch,
+					conn: subBatch.sql,
 					formula: f,
 					trigger: trigger,
 					params: params,
@@ -696,7 +692,7 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 				if (f === null)
 					return cb("init is not a formula: " + value.init);
 				var opts = {
-					subBatch: subBatch,
+					conn: subBatch.sql,
 					formula: f,
 					trigger: trigger,
 					params: params,
@@ -1164,7 +1160,7 @@ function handleTrigger(subBatch, trigger, params, stateVars, arrDefinition, addr
 		if (!objStateUpdate || bBouncing)
 			return cb();
 		var opts = {
-			subBatch: subBatch,
+			conn: subBatch.sql,
 			formula: objStateUpdate.formula,
 			trigger: trigger,
 			params: params,

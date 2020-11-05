@@ -644,8 +644,7 @@ test.cb('validate samples', t => {
 // composing
 
 test.cb.serial('compose simple AA', t => {
-	var db = require("../db");
-	var batch = kvstore.batch();
+	var batcher = require("../batcher");
 	var stateVars = {};
 	var objMcUnit = {
 		unit: 'DTDDiGV4wBlVUdEpwwQMxZK2ZsHQGBQ6x4vM463/uy8=',
@@ -679,15 +678,12 @@ test.cb.serial('compose simple AA', t => {
 		onDone();
 	}
 	
-	db.takeConnectionFromPool(conn => {
-		conn.query('BEGIN');
-		conn.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
-		conn.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 0, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
-		conn.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
-		aa_composer.handleTrigger(conn, batch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (bPosted, bBounced) => {
-			conn.query('ROLLBACK', () => {
-				conn.release();
-			});
+	batcher.startSubBatch(subBatch => {
+		subBatch.sql.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
+		subBatch.sql.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 0, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
+		subBatch.sql.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
+		aa_composer.handleTrigger(subBatch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (bPosted, bBounced) => {
+			subBatch.rollback();
 			t.deepEqual(!!bPosted, true);
 			t.deepEqual(bBounced, false);
 			t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'payment'); }).payload.outputs.find(function (output) { return (output.address === trigger.address); }).amount, 38000);
@@ -698,8 +694,7 @@ test.cb.serial('compose simple AA', t => {
 });
 
 test.cb.serial('compose complex AA', t => {
-	var db = require("../db");
-	var batch = kvstore.batch();
+	var batcher = require("../batcher");
 	var stateVars = {};
 	var objMcUnit = {
 		unit: 'DTDDiGV4wBlVUdEpwwQMxZK2ZsHQGBQ6x4vM463/uy8=',
@@ -774,29 +769,25 @@ test.cb.serial('compose complex AA', t => {
 		onDone();
 	}
 	
-	db.takeConnectionFromPool(conn => {
-		conn.query('BEGIN');
-		conn.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
-		conn.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 1, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
-		conn.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
-		aa_composer.handleTrigger(conn, batch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (bPosted, bBounced) => {
-			conn.query('ROLLBACK', () => {
-				conn.release();
-			});
-			t.deepEqual(!!bPosted, true);
-			t.deepEqual(bBounced, false);
-			t.deepEqual(stateVars[address]['z'].value.toNumber(), 4.5);
-			t.deepEqual(stateVars[address]['long_num2'].value.toNumber(), 1.00067890123457);
-			t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'payment'); }).payload.outputs.find(function (output) { return (output.address === trigger.address); }).amount, 18150);
-			t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'data'); }).payload.zzz, undefined);
-			t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'data'); }).payload.val_300, 80000);
-			batch.write(err => {
-				if (err)
-					throw Error("batch write failed: " + err);
-				// check that object state vars are saved correctly
-				storage.readAAStateVars(address, vars => {
-					t.deepEqual(vars['ob'], { h: 'ff', g: 8, d: [2, 'dd'] });
-					t.end();
+	batcher.startSubBatch(subBatch => {
+		subBatch.sql.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
+		subBatch.sql.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 1, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
+		subBatch.sql.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
+		aa_composer.handleTrigger(subBatch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (bPosted, bBounced) => {
+			subBatch.kv.write(function(){
+				subBatch.release(function(){
+					t.deepEqual(!!bPosted, true);
+					t.deepEqual(bBounced, false);
+					t.deepEqual(stateVars[address]['z'].value.toNumber(), 4.5);
+					t.deepEqual(stateVars[address]['long_num2'].value.toNumber(), 1.00067890123457);
+					t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'payment'); }).payload.outputs.find(function (output) { return (output.address === trigger.address); }).amount, 18150);
+					t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'data'); }).payload.zzz, undefined);
+					t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'data'); }).payload.val_300, 80000);
+						// check that object state vars are saved correctly
+					storage.readAAStateVars(address, vars => {
+						t.deepEqual(vars['ob'], { h: 'ff', g: 8, d: [2, 'dd'] });
+						t.end();
+					});
 				});
 			});
 		});
@@ -805,8 +796,7 @@ test.cb.serial('compose complex AA', t => {
 
 
 test.cb.serial('variable reassignment', t => {
-	var db = require("../db");
-	var batch = kvstore.batch();
+	var batcher = require("../batcher");
 	var stateVars = {};
 	var objMcUnit = {
 		unit: 'DTDDiGV4wBlVUdEpwwQMxZK2ZsHQGBQ6x4vM463/uy8=',
@@ -841,15 +831,12 @@ test.cb.serial('variable reassignment', t => {
 		onDone();
 	}
 	
-	db.takeConnectionFromPool(conn => {
-		conn.query('BEGIN');
-		conn.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
-		conn.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 2, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
-		conn.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
-		aa_composer.handleTrigger(conn, batch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (bPosted, bounce_message) => {
-			conn.query('ROLLBACK', () => {
-				conn.release();
-			});
+	batcher.startSubBatch(subBatch => {
+		subBatch.sql.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
+		subBatch.sql.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 2, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
+		subBatch.sql.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
+		aa_composer.handleTrigger(subBatch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (bPosted, bounce_message) => {
+			subBatch.rollback();
 			t.deepEqual(!!bPosted, true);
 			t.deepEqual(bounce_message, 'formula $a=10; trigger.output[[asset=base]] - 2000 failed: reassignment to a, old value 9');
 			t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'payment'); }).payload.outputs.find(function (output) { return (output.address === trigger.address); }).amount, 30000);
@@ -859,8 +846,7 @@ test.cb.serial('variable reassignment', t => {
 });
 
 test.cb.serial('no messages', t => {
-	var db = require("../db");
-	var batch = kvstore.batch();
+	var batcher = require("../batcher");
 	var stateVars = {};
 	var objMcUnit = {
 		unit: 'DTDDiGV4wBlVUdEpwwQMxZK2ZsHQGBQ6x4vM463/uy8=',
@@ -888,11 +874,10 @@ test.cb.serial('no messages', t => {
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	db.takeConnectionFromPool(conn => {
-		conn.query('BEGIN');
-		conn.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
-		conn.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 3, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
-		conn.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
+	batcher.startSubBatch(subBatch => {
+		subBatch.sql.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
+		subBatch.sql.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 3, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
+		subBatch.sql.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
 
 		var objUnit;
 		writer.saveJoint = function (objJoint, objValidationState, preCommitCallback, onDone) {
@@ -901,10 +886,8 @@ test.cb.serial('no messages', t => {
 			onDone();
 		}
 		
-		aa_composer.handleTrigger(conn, batch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (objResponseUnit, bounce_message) => {
-			conn.query('ROLLBACK', () => {
-				conn.release();
-			});
+		aa_composer.handleTrigger(subBatch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (objResponseUnit, bounce_message) => {
+			subBatch.rollback();
 			t.deepEqual(objResponseUnit.unit, 'XKxmIIccP1UR3Pem2jex0Lrzllc6w+WQ9ASqDehjUm4=');
 			t.deepEqual(bounce_message, 'no messages');
 			t.deepEqual(objUnit.unit, 'XKxmIIccP1UR3Pem2jex0Lrzllc6w+WQ9ASqDehjUm4=');
@@ -916,8 +899,7 @@ test.cb.serial('no messages', t => {
 
 
 test.cb.serial('no outputs', t => {
-	var db = require("../db");
-	var batch = kvstore.batch();
+	var batcher = require("../batcher");
 	var stateVars = {};
 	var objMcUnit = {
 		unit: 'DTDDiGV4wBlVUdEpwwQMxZK2ZsHQGBQ6x4vM463/uy8=',
@@ -943,11 +925,10 @@ test.cb.serial('no outputs', t => {
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	db.takeConnectionFromPool(conn => {
-		conn.query('BEGIN');
-		conn.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
-		conn.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 4, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
-		conn.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
+	batcher.startSubBatch(subBatch => {
+		subBatch.sql.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
+		subBatch.sql.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 4, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
+		subBatch.sql.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
 
 		var objUnit;
 		writer.saveJoint = function (objJoint, objValidationState, preCommitCallback, onDone) {
@@ -956,10 +937,8 @@ test.cb.serial('no outputs', t => {
 			onDone();
 		}
 		
-		aa_composer.handleTrigger(conn, batch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (objResponseUnit, bounce_message) => {
-			conn.query('ROLLBACK', () => {
-				conn.release();
-			});
+		aa_composer.handleTrigger(subBatch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (objResponseUnit, bounce_message) => {
+			subBatch.rollback();
 			t.deepEqual(bounce_message, 'no messages after filtering, then no state changes');
 			t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'payment'); }).payload.outputs.find(function (output) { return (output.address === trigger.address); }).amount, 30000);
 			t.end();
@@ -969,8 +948,7 @@ test.cb.serial('no outputs', t => {
 
 
 test.cb.serial('only 0 output', t => {
-	var db = require("../db");
-	var batch = kvstore.batch();
+	var batcher = require("../batcher");
 	var stateVars = {};
 	var objMcUnit = {
 		unit: 'DTDDiGV4wBlVUdEpwwQMxZK2ZsHQGBQ6x4vM463/uy8=',
@@ -996,11 +974,10 @@ test.cb.serial('only 0 output', t => {
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	db.takeConnectionFromPool(conn => {
-		conn.query('BEGIN');
-		conn.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
-		conn.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 5, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
-		conn.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
+	batcher.startSubBatch(subBatch => {
+		subBatch.sql.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
+		subBatch.sql.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 5, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
+		subBatch.sql.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
 
 		var objUnit;
 		writer.saveJoint = function (objJoint, objValidationState, preCommitCallback, onDone) {
@@ -1009,10 +986,8 @@ test.cb.serial('only 0 output', t => {
 			onDone();
 		}
 		
-		aa_composer.handleTrigger(conn, batch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (objResponseUnit, bounce_message) => {
-			conn.query('ROLLBACK', () => {
-				conn.release();
-			});
+		aa_composer.handleTrigger(subBatch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (objResponseUnit, bounce_message) => {
+			subBatch.rollback();
 			t.deepEqual(bounce_message, 'no messages after removing 0-outputs, then no state changes');
 			t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'payment'); }).payload.outputs.find(function (output) { return (output.address === trigger.address); }).amount, 30000);
 			t.end();
@@ -1022,8 +997,7 @@ test.cb.serial('only 0 output', t => {
 
 
 test.cb.serial('AA with response vars', t => {
-	var db = require("../db");
-	var batch = kvstore.batch();
+	var batcher = require("../batcher");
 	var stateVars = {};
 	var objMcUnit = {
 		unit: 'DTDDiGV4wBlVUdEpwwQMxZK2ZsHQGBQ6x4vM463/uy8=',
@@ -1050,11 +1024,10 @@ test.cb.serial('AA with response vars', t => {
 		]
 	}];
 	var address = objectHash.getChash160(aa);
-	db.takeConnectionFromPool(conn => {
-		conn.query('BEGIN');
-		conn.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
-		conn.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 6, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
-		conn.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
+	batcher.startSubBatch(subBatch => {
+		subBatch.sql.query("INSERT INTO aa_addresses (address, definition, unit, mci) VALUES(?, ?, ?, ?)", [address, JSON.stringify(aa), objMcUnit.last_ball_unit, 500]);
+		subBatch.sql.query("INSERT INTO outputs (unit, message_index, output_index, address, amount) VALUES(?, 0, 6, ?, ?)", [objMcUnit.unit, address, trigger.outputs.base]);
+		subBatch.sql.query("DELETE FROM aa_responses WHERE trigger_unit=? AND aa_address=?", [trigger.unit, address]);
 
 		var objUnit;
 		writer.saveJoint = function (objJoint, objValidationState, preCommitCallback, onDone) {
@@ -1063,10 +1036,8 @@ test.cb.serial('AA with response vars', t => {
 			onDone();
 		}
 		
-		aa_composer.handleTrigger(conn, batch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (bPosted, bBounced) => {
-			conn.query('ROLLBACK', () => {
-				conn.release();
-			});
+		aa_composer.handleTrigger(subBatch, trigger, {}, stateVars, aa, address, 600, objMcUnit, false, arrResponseUnits, (bPosted, bBounced) => {
+			subBatch.rollback();
 			t.deepEqual(!!bPosted, true);
 			t.deepEqual(bBounced, false);
 			t.deepEqual(objUnit.messages.find(function (message) { return (message.app === 'payment'); }).payload.outputs.find(function (output) { return (output.address === trigger.address); }).amount, 38000);
