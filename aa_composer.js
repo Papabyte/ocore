@@ -1617,7 +1617,7 @@ function checkBalances() {
 			subBatch.sql.query("SELECT 1 FROM aa_triggers", function (rows) {
 				if (rows.length > 0) {
 					console.log("skipping checkBalances because there are unhandled triggers");
-					conn.release();
+					subBatch.release();
 					return unlock();
 				}
 				var stable_or_from_aa = "( \n\

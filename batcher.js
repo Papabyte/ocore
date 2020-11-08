@@ -1,6 +1,7 @@
 /*jslint node: true */
 "use strict";
 var db = require('./db.js');
+var eventBus = require('./event_bus.js');
 var kvstore = require('./kvstore.js');
 var EventEmitter = require('events').EventEmitter;
 var util = require('util');
@@ -28,6 +29,8 @@ var kvSubCacheDel = {};
 var arrSingleQueries = [];
 var arrSubBatches = [];
 
+var batchStartTime;
+const batchPeriod = 1000; //ms
 
 exports.query = function(sql, args, cb) { // execute a SQL query as soon as possible working with current uncommited data
 	if (bOngoingBatch || bWaitingConnection){
@@ -51,15 +54,15 @@ exports.query = function(sql, args, cb) { // execute a SQL query as soon as poss
 }
 
 exports.startSubBatch = function(callback){ // start a subbatch as soon as a connection from pool is available
-	console.log('startSubBatch ' + bOngoingSubBatch + ' ' + bWaitingConnection + ' ' +bCommittingBatch)
 	if (!bOngoingBatch && !bWaitingConnection){
 		console.log('start new batch ');
+		batchStartTime = new Date();
 		bWaitingConnection = true;
 		bCommit = false;
 		bOngoingSubBatch = true;
 		setTimeout(function(){
 			bCommit = true;
-		}, 1200);
+		}, batchPeriod);
 		batch = bCordova ? { 
 			get: ()=>{},
 			put: ()=>{},
@@ -135,11 +138,11 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 					}
 				},
 				put: function(key, value){ // put kv data in sub batch cache
-					console.log("put in subbatch " + key + " " + value)
 					kvSubCachePut[key] = value;
 					delete kvSubCacheDel[key];
 				},
 				del: function(key){ // delete kv data in sub batch cache
+					console.log("delete in subbatch " + key)
 					kvSubCacheDel[key] = true;
 					delete kvSubCachePut[key];
 				},
@@ -152,13 +155,15 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 				write: function(cb){ // copy kv data from sub batch to batch cache
 					console.log("write kv subbatch")
 					for (var key in kvSubCacheDel){
+						console.log('batch del ' + key);
 						batch.del(key);
 						kvCacheDel[key] = true;
+						delete kvCachePut[key];
 					}
 					for (var key in kvSubCachePut){
 						batch.put(key, kvSubCachePut[key]);
 						kvCachePut[key] = kvSubCachePut[key];
-					}
+					}				
 					for (var key in kvSubCachePut) // clear sub batch cache
 						delete kvSubCachePut[key];
 					for (var key in kvSubCacheDel)
@@ -175,26 +180,21 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 		console.log("commitBatchIfNecessary")
 		if (bCommit){
 			console.log('will commit batch')
-
 			commitBatch(function(){
 				profiler.stop('batch-commit');
-				bOngoingBatch = false;
-				conn.release();
-				conn = null;
 				if (cb)
 					cb();
-				processNextSubBatch();
-				
+				processNextSubBatch();	
 			})
 		}
 		else {
-
-	/*		clearTimeout(timerId);
+			var elapsedTimeSinceBatchStart = batchStartTime - (new Date());
+			clearTimeout(timerId);
 			timerId = setTimeout(function(){
-				if (bOngoingBatch && !bOngoingSubBatch){
+				if (bOngoingBatch && !bOngoingSubBatch && !bCommittingBatch){
 					commitBatch();
 				}
-			}, 1000);*/
+			}, batchPeriod - elapsedTimeSinceBatchStart);
 			profiler.stop('sub-batch-end');
 			console.log('no batch commit yet')
 			bOngoingSubBatch = false;
@@ -204,8 +204,8 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 		}
 
 		function commitBatch(cb){ // first write kv batch cache to rocksdb then commit the SQL batch
-			if (bCommittingBatch)
-				return cb();
+			if (bCommittingBatch && cb)
+				return eventBus.once('batch_committed', cb);
 			bCommittingBatch = true;
 			batch.write({sync: true}, function(err){
 				if (err)
@@ -222,6 +222,10 @@ exports.startSubBatch = function(callback){ // start a subbatch as soon as a con
 				conn.query("COMMIT", function(){
 					console.log('batch committed')
 					bCommittingBatch = false;
+					bOngoingBatch = false;
+					conn.release();
+					conn = null;
+					eventBus.emit('batch_committed');
 					if (cb)
 						cb();
 				});
@@ -243,12 +247,51 @@ var createReadStream = function(options){ // create a read stream merging kv bat
 	var self = this;
 	var arrResults = [];
 	var bDestroyed = false;
-	console.log(options);
-	kvstore.createReadStream(options)
+	var bMatchInCache = false;
+	var start_time = new Date();
+
+	if (!options)
+		options = {};
+
+	function isOutsideRange(key){
+		if (options.gt && key <= options.gt){
+			return true;
+		}
+		if (options.gte && key < options.gte){
+			return true;
+		}
+		if (options.lt && key >= options.lt){
+			return true;
+		}
+		if (options.lte && key > options.lte){
+			return true;
+		}
+		return false;
+	}
+
+	for (var key in kvCachePut){
+		if (isOutsideRange(key))
+			continue;
+		if (options.keys)
+			arrResults.push(key);
+		else
+			arrResults.push({key: key, value: kvCachePut[key]});
+		bMatchInCache = true;
+	}
+
+	for (var key in kvCacheDel){
+		if (isOutsideRange(key))
+			continue;
+		bMatchInCache = true;
+	}
+
+	var stream = kvstore.createReadStream(options)
 	.on('data', handleData)
 	.on('end', onEnd);
 
 	function handleData(data){
+		if (!bMatchInCache)
+			return self.emit('data', data); // if cache is empty for the looked key, we pass the event directly
 		var key;
 		if (options.keys)
 			key = data;
@@ -261,24 +304,8 @@ var createReadStream = function(options){ // create a read stream merging kv bat
 	}
 
 	function onEnd(){
-		for (var key in kvCachePut){
-			if (options.gt && key <= options.gt){
-				continue;
-			}
-			if (options.gte && key < options.gte){
-				continue;
-			}
-			if (options.lt && key >= options.lt){
-				continue;
-			}
-			if (options.lte && key > options.lte){
-				continue;
-			}
-			console.log("found in cache "  + key + " " + kvCachePut[key]);
-			if (options.keys)
-				arrResults.push(key);
-			else
-				arrResults.push({key: key, value: kvCachePut[key]});
+		if (!bMatchInCache){
+			return self.emit('end');
 		}
 
 		if (options.keys)
@@ -293,12 +320,18 @@ var createReadStream = function(options){ // create a read stream merging kv bat
 		for (var i=0; i < limit && !bDestroyed; i++){
 			self.emit('data', arrResults[i]);
 		}
-		if (!bDestroyed)
+		if (!bDestroyed){
+			var elapsed = new Date() - start_time;
+			if (elapsed > 10)
+				process.stdout.write('\ncreateReadStream took ' + elapsed + 'ms ' + arrResults.length + ' ' + JSON.stringify(options));
 			self.emit('end');
+		}
 	}
 
 	this.destroy = function (){
 		bDestroyed = true;
+		if (!bMatchInCache)
+			stream.destroy();
 	}
 
 	return this;
